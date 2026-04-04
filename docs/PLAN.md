@@ -24,6 +24,7 @@ Claude Code's Discord plugin proves that `notifications/claude/channel` works fo
 - **Transport**: stdio (standard MCP server, spawned by Claude Code)
 - **HTTP endpoint**: localhost, configurable port
 - **Single responsibility**: receive HTTP POST, emit MCP notification
+- **Capabilities**: `tools` + `experimental: { "claude/channel": {} }` (required for Claude Code to accept channel notifications)
 
 ### HTTP Interface
 
@@ -42,25 +43,25 @@ Content-Type: application/json
 
 Response:
 - `202 Accepted` — notification sent
-- `400 Bad Request` — missing content
+- `422 Unprocessable Entity` — missing or invalid body
 
 ### MCP Notification
 
-```typescript
-mcp.notification({
-  method: 'notifications/claude/channel',
-  params: {
-    content,       // from POST body
-    meta: {
-      source,      // from POST body
-      ts,          // ISO 8601 timestamp (server-generated)
-      ...meta      // from POST body
+```json
+{
+  "method": "notifications/claude/channel",
+  "params": {
+    "content": "...",
+    "meta": {
+      "source": "...",
+      "ts": "2026-04-03T10:00:00Z",
+      "...": "..."
     }
   }
-})
+}
 ```
 
-### MCP Tools (optional, for session-side control)
+### MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -74,10 +75,17 @@ Port selection strategy (in order):
 
 The server prints the listening port to stderr on startup so both Claude Code logs and external scripts can discover it. Also writes `~/.relay-mcp/port` for programmatic discovery.
 
+### Claude Code settings
+
+Channel notifications require two settings:
+
+1. **`channelsEnabled: true`** in `~/.claude/settings.json` or `.claude/settings.local.json`
+2. **`--dangerously-load-development-channels server:relay-mcp`** flag at startup (required for non-plugin MCP servers)
+
 ## Tech Stack
 
 - **Language**: Rust
-- **MCP SDK**: `rmcp` (MCP公式 Rust SDK, v1.3.0+)
+- **MCP SDK**: `rmcp` (MCP official Rust SDK, v1.3.0+)
 - **HTTP**: `axum` (tokio-based)
 - **Async Runtime**: `tokio`
 - **Serialization**: `serde` + `serde_json`
@@ -90,6 +98,8 @@ relay-mcp/
 │   ├── main.rs             # entrypoint
 │   ├── mcp.rs              # MCP server handler + notification
 │   └── http.rs             # axum HTTP endpoint
+├── scripts/
+│   └── test-server.sh      # standalone test without Claude Code
 ├── docs/
 │   └── PLAN.md
 ├── Cargo.toml
@@ -100,20 +110,19 @@ relay-mcp/
 
 ### 1. Register as MCP server
 
-```json
-// ~/.claude/settings.json (mcpServers)
-{
-  "relay-mcp": {
-    "command": "bun",
-    "args": ["run", "/path/to/relay-mcp/src/server.ts"],
-    "env": {
-      "RELAY_MCP_PORT": "9315"
-    }
-  }
-}
+```bash
+claude mcp add --scope project relay-mcp \
+  -e RELAY_MCP_PORT=9315 \
+  -- /path/to/relay-mcp/target/release/relay-mcp
 ```
 
-### 2. Push from external process
+### 2. Start Claude Code
+
+```bash
+claude --dangerously-load-development-channels server:relay-mcp
+```
+
+### 3. Push from external process
 
 ```bash
 curl -X POST http://localhost:9315/notify \
@@ -121,10 +130,10 @@ curl -X POST http://localhost:9315/notify \
   -d '{"content": "PROJ-123 assigned to you", "source": "jira"}'
 ```
 
-### 3. Claude Code session receives
+### 4. Claude Code session receives
 
 ```xml
-<channel source="relay-mcp" ts="2026-04-03T10:00:00Z">
+<channel source="relay-mcp" source="jira" ts="2026-04-03T10:00:00Z">
 PROJ-123 assigned to you
 </channel>
 ```
