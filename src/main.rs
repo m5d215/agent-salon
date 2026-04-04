@@ -32,8 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = handler.serve(rmcp::transport::io::stdio()).await?;
     let peer = service.peer().clone();
 
-    // Write port file for programmatic discovery.
-    write_port_file(actual_port).await;
     eprintln!("relay-mcp HTTP listening on http://127.0.0.1:{actual_port}");
 
     // Start HTTP server.
@@ -62,22 +60,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     http_handle.abort();
     notify_handle.abort();
-    cleanup_port_file().await;
 
     Ok(())
-}
-
-async fn write_port_file(port: u16) {
-    let dir = dirs::home_dir()
-        .map(|h| h.join(".relay-mcp"))
-        .unwrap_or_default();
-    if let Ok(()) = tokio::fs::create_dir_all(&dir).await {
-        let _ = tokio::fs::write(dir.join("port"), port.to_string()).await;
-    }
-}
-
-async fn cleanup_port_file() {
-    if let Some(path) = dirs::home_dir().map(|h| h.join(".relay-mcp/port")) {
-        let _ = tokio::fs::remove_file(path).await;
-    }
 }

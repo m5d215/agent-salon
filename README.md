@@ -78,7 +78,6 @@ curl -X POST http://127.0.0.1:9315/notify \
 |--------|-------------|
 | `RELAY_MCP_PORT=9315` | Fixed port via environment variable |
 | (unset) | OS assigns an available port |
-| `~/.relay-mcp/port` | Port file written at startup for programmatic discovery |
 
 ## Local testing
 

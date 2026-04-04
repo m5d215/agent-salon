@@ -73,7 +73,7 @@ Port selection strategy (in order):
 1. `RELAY_MCP_PORT` environment variable
 2. Auto-select available port
 
-The server prints the listening port to stderr on startup so both Claude Code logs and external scripts can discover it. Also writes `~/.relay-mcp/port` for programmatic discovery.
+The server prints the listening port to stderr on startup.
 
 ### Claude Code settings
 
