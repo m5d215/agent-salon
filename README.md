@@ -19,14 +19,10 @@ cargo build --release
 
 ```bash
 # Project scope (recommended)
-claude mcp add --scope project relay-mcp \
-  -e RELAY_MCP_PORT=9315 \
-  -- /path/to/relay-mcp/target/release/relay-mcp
+claude mcp add --scope project relay-mcp -- /path/to/relay-mcp/target/release/relay-mcp
 
 # Or user scope (all projects)
-claude mcp add --scope user relay-mcp \
-  -e RELAY_MCP_PORT=9315 \
-  -- /path/to/relay-mcp/target/release/relay-mcp
+claude mcp add --scope user relay-mcp -- /path/to/relay-mcp/target/release/relay-mcp
 ```
 
 ### 2. Enable channel notifications
