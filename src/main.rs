@@ -1,6 +1,9 @@
+mod admin;
+mod db;
 mod http;
 mod mcp;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use mcp::{SalonHandler, SalonState};
@@ -15,12 +18,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(9315);
     let bind = std::env::var("AGENT_SALON_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let db_path =
+        std::env::var("AGENT_SALON_DB").unwrap_or_else(|_| "./agent-salon.db".to_string());
+
+    let pool = db::open(&db_path).await?;
+    eprintln!("agent-salon: db at {db_path}");
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     let actual_addr = listener.local_addr()?;
     let actual_port = actual_addr.port();
 
-    let state = Arc::new(SalonState::new(actual_port));
+    let state = Arc::new(SalonState::new(actual_port, pool));
 
     // MCP service: stateful streamable HTTP, fresh handler per session.
     let mcp_service = StreamableHttpService::new(
@@ -40,8 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("agent-salon listening on http://{actual_addr}");
     eprintln!("  notify: POST http://{actual_addr}/notify");
     eprintln!("  mcp:         http://{actual_addr}/mcp");
+    eprintln!("  admin UI:    http://{actual_addr}/admin");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

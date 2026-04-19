@@ -130,12 +130,41 @@ Multiple sessions can share a label — they form a group and every targeted not
 | `salon_status` | Show HTTP endpoints, active sessions with labels, and message count. |
 | `send_message` | Deliver a channel notification to another session (or broadcast). |
 
+### Admin UI
+
+`GET /admin` renders a plain HTML page listing every persisted message. Filter by `source` / `target` / time range, page through history, click a row for full detail (content, full `meta` JSON, `delivered_to`, `delivery_errors`, `sender_addr`, `sender_session_id`).
+
+The UI has no authentication — it relies on the surrounding network layer (loopback bind by default, or a Tailscale ACL when `AGENT_SALON_BIND=0.0.0.0`).
+
+### Persistence
+
+Every `deliver_notification` call writes a row into a SQLite database (default `./agent-salon.db`). Schema:
+
+```sql
+CREATE TABLE messages (
+  id                 TEXT PRIMARY KEY,   -- UUID v7 (time-sortable)
+  ts                 TEXT NOT NULL,      -- ISO 8601
+  via                TEXT NOT NULL,      -- 'notify' | 'tool'
+  source             TEXT NOT NULL,      -- sender label
+  target             TEXT,               -- NULL for broadcast
+  content            TEXT NOT NULL,
+  meta               TEXT NOT NULL,      -- JSON
+  delivered_to       TEXT NOT NULL,      -- JSON array of labels that received it
+  delivery_errors    TEXT NOT NULL,      -- JSON array of labels that failed and were pruned
+  sender_addr        TEXT,               -- remote addr of POST /notify (NULL for tool sends)
+  sender_session_id  TEXT                -- MCP session id (NULL for /notify)
+);
+```
+
+No retention policy — the table accumulates. Rotate manually when needed.
+
 ### Configuration
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `AGENT_SALON_PORT` | `9315` | TCP port the daemon binds to |
 | `AGENT_SALON_BIND` | `127.0.0.1` | Bind address. Set to `0.0.0.0` (or a specific interface IP) to accept connections from other machines — e.g. over a Tailscale / VPN network. |
+| `AGENT_SALON_DB` | `./agent-salon.db` | SQLite database path. Created on first run. |
 
 ## Local testing
 

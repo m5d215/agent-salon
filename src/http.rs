@@ -1,14 +1,15 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::mcp::{self, SalonState};
+use crate::mcp::{self, DeliveryContext, SalonState};
 
 /// Body of a `/notify` request.
 ///
@@ -43,15 +44,21 @@ pub struct AppState {
 
 pub async fn handle_notify(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(query): Query<NotifyQuery>,
     Json(mut payload): Json<NotifyPayload>,
 ) -> StatusCode {
     state.salon.message_count.fetch_add(1, Ordering::Relaxed);
     payload.source = Some(query.label);
+    let ctx = DeliveryContext {
+        via: Some(crate::db::Via::Notify),
+        sender_addr: Some(addr.to_string()),
+        sender_session_id: None,
+    };
     // Spawn so the HTTP response returns immediately.
     let salon = state.salon.clone();
     tokio::spawn(async move {
-        mcp::deliver_notification(&salon, &payload).await;
+        mcp::deliver_notification(&salon, &payload, ctx).await;
     });
     StatusCode::ACCEPTED
 }
@@ -59,5 +66,7 @@ pub async fn handle_notify(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/notify", post(handle_notify))
+        .route("/admin", get(crate::admin::list_page))
+        .route("/admin/messages/{id}", get(crate::admin::detail_page))
         .with_state(state)
 }

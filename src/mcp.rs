@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use chrono::Utc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -12,8 +13,11 @@ use rmcp::service::NotificationContext;
 use rmcp::{Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use sqlx::SqlitePool;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
+use crate::db::{self, MessageRow, Via};
 use crate::http::NotifyPayload;
 
 /// A connected MCP session and its user-supplied label (from `?label=` query).
@@ -27,16 +31,27 @@ pub struct SalonState {
     pub port: u16,
     pub message_count: AtomicU64,
     pub sessions: Mutex<Vec<Session>>,
+    pub db: SqlitePool,
 }
 
 impl SalonState {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, db: SqlitePool) -> Self {
         Self {
             port,
             message_count: AtomicU64::new(0),
             sessions: Mutex::new(Vec::new()),
+            db,
         }
     }
+}
+
+/// Context about where a notification originated, captured from the caller's
+/// transport (HTTP for `/notify`, MCP for `send_message`).
+#[derive(Debug, Clone, Default)]
+pub struct DeliveryContext {
+    pub via: Option<Via>,
+    pub sender_addr: Option<String>,
+    pub sender_session_id: Option<String>,
 }
 
 pub struct SalonHandler {
@@ -45,6 +60,10 @@ pub struct SalonHandler {
     /// initialize time. Used as the `source` when this session sends a
     /// notification via the `send_message` tool.
     self_label: Arc<Mutex<Option<String>>>,
+    /// This session's MCP session id (header `Mcp-Session-Id`), captured at
+    /// initialize time. Stored on each persisted message so tool-originated
+    /// rows carry the session id of the caller.
+    self_session_id: Arc<Mutex<Option<String>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -69,6 +88,7 @@ impl SalonHandler {
         Self {
             state,
             self_label: Arc::new(Mutex::new(None)),
+            self_session_id: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -127,7 +147,12 @@ impl SalonHandler {
             meta: params.meta,
             source: Some(source),
         };
-        deliver_notification(&self.state, &payload).await;
+        let ctx = DeliveryContext {
+            via: Some(Via::Tool),
+            sender_addr: None,
+            sender_session_id: self.self_session_id.lock().await.clone(),
+        };
+        deliver_notification(&self.state, &payload, ctx).await;
 
         Ok(match target_for_reply {
             Some(t) => format!("delivered to sessions labelled '{t}'"),
@@ -159,13 +184,17 @@ impl ServerHandler for SalonHandler {
     }
 
     async fn on_initialized(&self, ctx: NotificationContext<RoleServer>) {
-        let label = ctx
-            .extensions
-            .get::<http::request::Parts>()
-            .and_then(|parts| parts.uri.query())
+        let parts = ctx.extensions.get::<http::request::Parts>();
+        let label = parts
+            .and_then(|p| p.uri.query())
             .and_then(extract_label);
+        let session_id = parts
+            .and_then(|p| p.headers.get("mcp-session-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         *self.self_label.lock().await = label.clone();
+        *self.self_session_id.lock().await = session_id.clone();
 
         let mut sessions = self.state.sessions.lock().await;
         sessions.push(Session {
@@ -188,11 +217,20 @@ fn extract_label(query: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-/// Deliver a notification to matching sessions.
-/// - If `payload.target` is set, only sessions whose label equals it receive the notification.
-/// - If `payload.target` is None, every connected session receives it (broadcast).
-/// Sessions whose channel has closed are pruned.
-pub async fn deliver_notification(state: &SalonState, payload: &NotifyPayload) {
+/// Deliver a notification to matching sessions and persist it to the DB.
+///
+/// - If `payload.target` is set, only sessions whose label equals it receive
+///   the notification.
+/// - If `payload.target` is None, every connected session receives it
+///   (broadcast).
+/// - Sessions whose channel has closed are pruned and recorded under
+///   `delivery_errors` in the persisted row.
+pub async fn deliver_notification(
+    state: &SalonState,
+    payload: &NotifyPayload,
+    ctx: DeliveryContext,
+) {
+    let ts = Utc::now();
     let meta = {
         let mut map = payload.meta.clone().unwrap_or_default();
         if let Some(source) = &payload.source {
@@ -200,7 +238,7 @@ pub async fn deliver_notification(state: &SalonState, payload: &NotifyPayload) {
         }
         map.insert(
             "ts".into(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            serde_json::Value::String(ts.to_rfc3339()),
         );
         map
     };
@@ -215,6 +253,9 @@ pub async fn deliver_notification(state: &SalonState, payload: &NotifyPayload) {
         Some(params),
     ));
 
+    let mut delivered_to: Vec<String> = Vec::new();
+    let mut delivery_errors: Vec<String> = Vec::new();
+
     let mut sessions = state.sessions.lock().await;
     let mut alive = Vec::with_capacity(sessions.len());
     for session in sessions.drain(..) {
@@ -226,10 +267,38 @@ pub async fn deliver_notification(state: &SalonState, payload: &NotifyPayload) {
             alive.push(session);
             continue;
         }
+        let label_for_log = session
+            .label
+            .clone()
+            .unwrap_or_else(|| "<unlabeled>".into());
         match session.peer.send_notification(notification.clone()).await {
-            Ok(()) => alive.push(session),
-            Err(e) => eprintln!("agent-salon: dropping session (send failed): {e}"),
+            Ok(()) => {
+                delivered_to.push(label_for_log);
+                alive.push(session);
+            }
+            Err(e) => {
+                eprintln!("agent-salon: dropping session (send failed): {e}");
+                delivery_errors.push(label_for_log);
+            }
         }
     }
     *sessions = alive;
+    drop(sessions);
+
+    let row = MessageRow {
+        id: Uuid::now_v7(),
+        ts,
+        via: ctx.via.unwrap_or(Via::Notify),
+        source: payload.source.clone().unwrap_or_default(),
+        target: payload.target.clone(),
+        content: payload.content.clone(),
+        meta: serde_json::Value::Object(meta.into_iter().collect()),
+        delivered_to,
+        delivery_errors,
+        sender_addr: ctx.sender_addr,
+        sender_session_id: ctx.sender_session_id,
+    };
+    if let Err(e) = db::insert_message(&state.db, &row).await {
+        eprintln!("agent-salon: failed to persist message {}: {e}", row.id);
+    }
 }

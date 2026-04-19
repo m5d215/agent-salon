@@ -85,10 +85,19 @@ Senders identify themselves with `?label=<name>` on the `/notify` URL. This is r
 | `salon_status` | Show HTTP endpoints, active sessions with labels, and message count. |
 | `send_message` | Send a `notifications/claude/channel` to another session (or broadcast). The `source` attribute is taken from the calling session's own `?label=` and cannot be overridden. Sessions without a label cannot call this tool (`-32602`). |
 
+## Persistence and Admin UI
+
+Every delivery is persisted to a SQLite database. The schema captures enough to reconstruct the full wire payload (content + meta) and enough to answer "did it actually arrive?" (delivered_to / delivery_errors), "who sent it?" (source + via + sender_addr + sender_session_id), and "when?" (ts as UUID v7 + explicit column). See the README for the full DDL.
+
+`GET /admin` serves a plain HTML listing (no JS framework, no auth beyond network reachability). `GET /admin/messages/{id}` shows the full detail of a single row.
+
+Filters on the list page: `source`, `target`, `since`, `until`. Pagination at 50/page. No full-text search — the goal is "see who's been talking to whom", not grep.
+
 ## Configuration
 
 - `AGENT_SALON_PORT` — fixed port the daemon binds to (default `9315`).
 - `AGENT_SALON_BIND` — bind address (default `127.0.0.1`). Set to `0.0.0.0` or a Tailscale/VPN interface IP to accept connections from other machines.
+- `AGENT_SALON_DB` — SQLite database path (default `./agent-salon.db`). Created on first run.
 
 The server prints the listening port to stderr on startup.
 
@@ -114,7 +123,9 @@ agent-salon/
 ├── src/
 │   ├── main.rs             # entrypoint
 │   ├── mcp.rs              # MCP server handler + delivery
-│   └── http.rs             # axum HTTP endpoint
+│   ├── http.rs             # axum HTTP endpoint (/notify, /admin routes)
+│   ├── admin.rs            # /admin HTML rendering
+│   └── db.rs               # SQLite schema + queries
 ├── scripts/
 │   └── test-server.sh      # standalone test without Claude Code
 ├── docs/
