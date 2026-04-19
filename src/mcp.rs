@@ -22,14 +22,14 @@ pub struct Session {
     pub label: Option<String>,
 }
 
-/// Shared state between HTTP handler and MCP server.
-pub struct RelayState {
+/// Shared state of the salon.
+pub struct SalonState {
     pub port: u16,
     pub message_count: AtomicU64,
     pub sessions: Mutex<Vec<Session>>,
 }
 
-impl RelayState {
+impl SalonState {
     pub fn new(port: u16) -> Self {
         Self {
             port,
@@ -39,8 +39,8 @@ impl RelayState {
     }
 }
 
-pub struct RelayHandler {
-    state: Arc<RelayState>,
+pub struct SalonHandler {
+    state: Arc<SalonState>,
     /// This session's own label, captured from `?label=` on the /mcp URL at
     /// initialize time. Used as the `source` when this session sends a
     /// notification via the `send_message` tool.
@@ -64,8 +64,8 @@ pub struct SendMessageParams {
 }
 
 #[tool_router]
-impl RelayHandler {
-    pub fn new(state: Arc<RelayState>) -> Self {
+impl SalonHandler {
+    pub fn new(state: Arc<SalonState>) -> Self {
         Self {
             state,
             self_label: Arc::new(Mutex::new(None)),
@@ -73,8 +73,8 @@ impl RelayHandler {
         }
     }
 
-    #[tool(description = "Show HTTP endpoint URL, port, and message count")]
-    async fn relay_status(&self) -> String {
+    #[tool(description = "Show the salon's HTTP endpoints, active sessions, and message count")]
+    async fn salon_status(&self) -> String {
         let count = self.state.message_count.load(Ordering::Relaxed);
         let port = self.state.port;
         let sessions = self.state.sessions.lock().await;
@@ -137,7 +137,7 @@ impl RelayHandler {
 }
 
 #[tool_handler]
-impl ServerHandler for RelayHandler {
+impl ServerHandler for SalonHandler {
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::builder().enable_tools().build();
         // Declare claude/channel capability so Claude Code accepts our notifications.
@@ -148,9 +148,9 @@ impl ServerHandler for RelayHandler {
             .unwrap(),
         );
         ServerInfo::new(capabilities)
-            .with_server_info(Implementation::new("relay-mcp", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("agent-salon", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "relay-mcp: HTTP-to-MCP notification bridge and inter-session messaging. \
+                "agent-salon: a gathering place for Claude Code sessions. \
                  Connect with ?label=<name> on the /mcp URL to register your session. \
                  Use the `send_message` tool to deliver notifications to other labelled \
                  sessions (or broadcast). External processes can also POST to the \
@@ -173,7 +173,7 @@ impl ServerHandler for RelayHandler {
             label: label.clone(),
         });
         eprintln!(
-            "relay-mcp: session initialized (label={}, {} active)",
+            "agent-salon: session initialized (label={}, {} active)",
             label.as_deref().unwrap_or("<unlabeled>"),
             sessions.len()
         );
@@ -192,7 +192,7 @@ fn extract_label(query: &str) -> Option<String> {
 /// - If `payload.target` is set, only sessions whose label equals it receive the notification.
 /// - If `payload.target` is None, every connected session receives it (broadcast).
 /// Sessions whose channel has closed are pruned.
-pub async fn deliver_notification(state: &RelayState, payload: &NotifyPayload) {
+pub async fn deliver_notification(state: &SalonState, payload: &NotifyPayload) {
     let meta = {
         let mut map = payload.meta.clone().unwrap_or_default();
         if let Some(source) = &payload.source {
@@ -228,7 +228,7 @@ pub async fn deliver_notification(state: &RelayState, payload: &NotifyPayload) {
         }
         match session.peer.send_notification(notification.clone()).await {
             Ok(()) => alive.push(session),
-            Err(e) => eprintln!("relay-mcp: dropping session (send failed): {e}"),
+            Err(e) => eprintln!("agent-salon: dropping session (send failed): {e}"),
         }
     }
     *sessions = alive;

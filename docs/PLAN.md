@@ -1,21 +1,24 @@
-# relay-mcp Design Plan
+# agent-salon Design Plan
 
 ## Overview
 
-Generic HTTP-to-MCP notification bridge.
-External processes POST messages to a local HTTP endpoint, and the MCP server forwards them as `notifications/claude/channel` to the connected Claude Code session.
+A gathering place for Claude Code sessions. Every session (each running under a different role / persona) registers itself with a label and can exchange `notifications/claude/channel` messages with the others — targeted by label, or broadcast. External processes can also drop messages in via a plain HTTP webhook.
 
 ```
-┌─────────────┐  HTTP POST   ┌─────────────┐  stdio/MCP notification  ┌──────────────┐
-│ jira-watcher │─────────────▶│             │──────────────────────────▶│              │
-│ slack-poller │              │  relay-mcp  │                           │ Claude Code  │
-│ curl / etc.  │              │             │◀─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │  Session     │
-└─────────────┘              └─────────────┘  stdio (MCP transport)    └──────────────┘
+┌──────────────┐  HTTP POST   ┌──────────────┐  MCP Streamable HTTP    ┌──────────────┐
+│ jira-watcher │─────────────▶│              │────────────────────────▶│ laptop-a     │
+│ slack-poller │              │ agent-salon  │                         ├──────────────┤
+│ curl / CI    │              │   (daemon)   │                         │ laptop-b     │
+└──────────────┘              │              │                         ├──────────────┤
+                              │ Session      │  send_message tool      │ persona-c          │
+                              │ registry:    │◀────────────────────────│              │
+                              │ Vec<Session> │────────────────────────▶│ …            │
+                              └──────────────┘                         └──────────────┘
 ```
 
 ## Motivation
 
-Claude Code's Discord plugin proves that `notifications/claude/channel` works for pushing external messages into a session. But the pattern is tightly coupled to Discord. relay-mcp extracts the generic part — HTTP in, MCP notification out — so any external process can push messages.
+Claude Code's Discord plugin proves that `notifications/claude/channel` works for pushing external messages into a session. The same wire-level primitive is also exactly what's needed for sessions to talk to each other. agent-salon extracts the mechanism into a daemon, adds session-scoped labels for routing, and exposes an MCP tool so sessions can send without ever leaving the protocol.
 
 ## Architecture
 
@@ -23,9 +26,9 @@ Claude Code's Discord plugin proves that `notifications/claude/channel` works fo
 
 - **Transport**: Streamable HTTP (daemon; Claude Code connects by URL)
 - **Single port** serves both the external webhook (`POST /notify`) and the MCP endpoint (`/mcp`)
-- **Single responsibility**: receive HTTP POST, broadcast MCP notification to every connected session
+- **Responsibilities**: (a) receive webhook POSTs and forward them as channel notifications, (b) let connected sessions send channel notifications to one another via the `send_message` tool.
 - **Capabilities**: `tools` + `experimental: { "claude/channel": {} }` (required for Claude Code to accept channel notifications)
-- **Sessions**: tracked as `Vec<Peer<RoleServer>>`; a peer is registered on `notifications/initialized` and pruned lazily when a send fails.
+- **Sessions**: tracked as `Vec<Session { peer, label }>`; a peer is registered on `notifications/initialized` and pruned lazily when a send fails.
 
 ### HTTP Interface
 
@@ -48,6 +51,7 @@ it claims to be. `source` in the body is stripped.
 
 Response:
 - `202 Accepted` — notification sent
+- `400 Bad Request` — `?label=` missing
 - `422 Unprocessable Entity` — missing or invalid body
 
 ### MCP Notification
@@ -70,7 +74,7 @@ Response:
 
 Each Claude Code session may identify itself with a label via a `?label=<name>` query parameter on the `/mcp` URL. Labels are captured on `notifications/initialized` from the injected `http::request::Parts` and stored alongside the `Peer` in the session registry.
 
-`POST /notify` with a matching `target` fans out only to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. Multiple sessions sharing a label form an implicit group.
+Delivery with a matching `target` fans out only to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. Multiple sessions sharing a label form an implicit group.
 
 Senders identify themselves with `?label=<name>` on the `/notify` URL. This is required; `POST /notify` without a `?label=` returns 400. The value becomes `meta.source` on the outgoing notification. `source` in the JSON body is deliberately stripped (`#[serde(skip_deserializing)]`) so that an LLM-authored body cannot claim to be someone else.
 
@@ -78,13 +82,13 @@ Senders identify themselves with `?label=<name>` on the `/notify` URL. This is r
 
 | Tool | Description |
 |------|-------------|
-| `relay_status` | Show HTTP endpoint URL, port, active sessions with labels, and message count |
+| `salon_status` | Show HTTP endpoints, active sessions with labels, and message count. |
 | `send_message` | Send a `notifications/claude/channel` to another session (or broadcast). The `source` attribute is taken from the calling session's own `?label=` and cannot be overridden. Sessions without a label cannot call this tool (`-32602`). |
 
 ## Configuration
 
-- `RELAY_MCP_PORT` — fixed port the daemon binds to (default `9315`).
-- `RELAY_MCP_BIND` — bind address (default `127.0.0.1`). Set to `0.0.0.0` or a Tailscale/VPN interface IP to accept connections from other machines.
+- `AGENT_SALON_PORT` — fixed port the daemon binds to (default `9315`).
+- `AGENT_SALON_BIND` — bind address (default `127.0.0.1`). Set to `0.0.0.0` or a Tailscale/VPN interface IP to accept connections from other machines.
 
 The server prints the listening port to stderr on startup.
 
@@ -93,7 +97,7 @@ The server prints the listening port to stderr on startup.
 Channel notifications require two settings:
 
 1. **`channelsEnabled: true`** in `~/.claude/settings.json` or `.claude/settings.local.json`
-2. **`--dangerously-load-development-channels server:relay-mcp`** flag at startup (required for non-plugin MCP servers)
+2. **`--dangerously-load-development-channels server:agent-salon`** flag at startup (required for non-plugin MCP servers)
 
 ## Tech Stack
 
@@ -106,10 +110,10 @@ Channel notifications require two settings:
 ## File Structure
 
 ```
-relay-mcp/
+agent-salon/
 ├── src/
 │   ├── main.rs             # entrypoint
-│   ├── mcp.rs              # MCP server handler + notification
+│   ├── mcp.rs              # MCP server handler + delivery
 │   └── http.rs             # axum HTTP endpoint
 ├── scripts/
 │   └── test-server.sh      # standalone test without Claude Code
@@ -124,43 +128,53 @@ relay-mcp/
 ### 1. Start the daemon
 
 ```bash
-./target/release/relay-mcp
+./target/release/agent-salon
 ```
 
 ### 2. Register as MCP server (HTTP transport)
 
 ```bash
-claude mcp add --scope project --transport http relay-mcp http://127.0.0.1:9315/mcp
+claude mcp add --scope project --transport http agent-salon 'http://127.0.0.1:9315/mcp?label=laptop-a'
 ```
 
 ### 3. Start Claude Code
 
 ```bash
-claude --dangerously-load-development-channels server:relay-mcp
+claude --dangerously-load-development-channels server:agent-salon
 ```
 
-### 3. Push from external process
+### 4a. Push from external process
 
 ```bash
-curl -X POST http://localhost:9315/notify \
+curl -X POST 'http://localhost:9315/notify?label=jira' \
   -H 'Content-Type: application/json' \
-  -d '{"content": "PROJ-123 assigned to you", "source": "jira"}'
+  -d '{"content":"PROJ-123 assigned to you","target":"laptop-a"}'
 ```
 
-### 4. Claude Code session receives
+### 4b. Or from another Claude Code session (inside the salon)
+
+```jsonc
+send_message({
+  content: "done",
+  target:  "laptop-a",
+  meta:    { kind: "ack" }
+})
+```
+
+### 5. Receiving session sees
 
 ```xml
-<channel source="relay-mcp" source="jira" ts="2026-04-03T10:00:00Z">
+<channel source="agent-salon" source="jira" ts="2026-04-03T10:00:00Z">
 PROJ-123 assigned to you
 </channel>
 ```
 
 ## Out of Scope (for now)
 
-- Authentication / token-based access control
-- Queue / persistence (if session is not connected, messages are dropped)
-- WebSocket or SSE transport
-- Built-in pollers (Jira, Slack, etc.) — these are separate CLIs that POST to relay-mcp
+- Authentication / token-based access control (today the only protection is network reachability — e.g. Tailscale ACLs)
+- Queue / persistence (if no session matches, messages are dropped)
+- Active session health-check (stale peers are pruned lazily on send failure, not proactively)
+- Built-in pollers (Jira, Slack, etc.) — these remain separate CLIs that POST to agent-salon
 
 ## Reference
 

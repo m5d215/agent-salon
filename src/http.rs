@@ -8,7 +8,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::mcp::{self, RelayState};
+use crate::mcp::{self, SalonState};
 
 /// Body of a `/notify` request.
 ///
@@ -38,7 +38,7 @@ pub struct NotifyQuery {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub relay: Arc<RelayState>,
+    pub salon: Arc<SalonState>,
 }
 
 pub async fn handle_notify(
@@ -46,12 +46,12 @@ pub async fn handle_notify(
     Query(query): Query<NotifyQuery>,
     Json(mut payload): Json<NotifyPayload>,
 ) -> StatusCode {
-    state.relay.message_count.fetch_add(1, Ordering::Relaxed);
+    state.salon.message_count.fetch_add(1, Ordering::Relaxed);
     payload.source = Some(query.label);
     // Spawn so the HTTP response returns immediately.
-    let relay = state.relay.clone();
+    let salon = state.salon.clone();
     tokio::spawn(async move {
-        mcp::deliver_notification(&relay, &payload).await;
+        mcp::deliver_notification(&salon, &payload).await;
     });
     StatusCode::ACCEPTED
 }

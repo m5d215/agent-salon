@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # End-to-end smoke test without Claude Code.
 #
-# Starts relay-mcp, performs the MCP Streamable HTTP initialize handshake,
+# Starts agent-salon, performs the MCP Streamable HTTP initialize handshake,
 # opens an SSE GET stream, POSTs a notification to /notify, and prints the
 # resulting notifications/claude/channel event that the stream receives.
 
 set -euo pipefail
 
-PORT=${RELAY_MCP_PORT:-9315}
-BIN=./target/release/relay-mcp
-MCP=http://127.0.0.1:$PORT/mcp
-NOTIFY=http://127.0.0.1:$PORT/notify
+PORT=${AGENT_SALON_PORT:-9315}
+BIN=./target/release/agent-salon
+MCP="http://127.0.0.1:$PORT/mcp?label=smoke"
+NOTIFY="http://127.0.0.1:$PORT/notify?label=smoke"
 
 if [[ ! -x "$BIN" ]]; then
   cargo build --release
@@ -24,20 +24,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Start relay-mcp.
-RELAY_MCP_PORT="$PORT" "$BIN" &
+# 1. Start agent-salon.
+AGENT_SALON_PORT="$PORT" "$BIN" &
 SERVER_PID=$!
 
 for _ in $(seq 1 20); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/notify" \
-       -H 'Content-Type: application/json' -d '{}' 2>/dev/null; then
+  if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
     break
   fi
-  nc -z 127.0.0.1 "$PORT" 2>/dev/null && break
   sleep 0.1
 done
 
-echo "# relay-mcp up on $PORT"
+echo "# agent-salon up on $PORT"
 
 # 2. Initialize and capture session id.
 HEADERS=$(mktemp)
@@ -70,7 +68,7 @@ sleep 0.3
 
 # 5. POST a sample notification.
 echo "# POST /notify"
-jq -nc '{content: "hello", source: "test", meta: {example: true}}' \
+jq -nc '{content: "hello", meta: {example: true}}' \
   | curl -fsS -X POST "$NOTIFY" \
       -H 'Content-Type: application/json' -d @- \
   | cat

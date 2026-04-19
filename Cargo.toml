@@ -1,10 +1,10 @@
 [package]
-name = "relay-mcp"
+name = "agent-salon"
 version = "0.1.0"
 edition = "2024"
-description = "Lightweight HTTP-to-MCP notification bridge for Claude Code"
+description = "A gathering place for Claude Code sessions — targeted channel-notification messaging between agents, plus an HTTP webhook inbox."
 license = "MIT"
-repository = "https://github.com/m5d215/relay-mcp"
+repository = "https://github.com/m5d215/agent-salon"
 
 [dependencies]
 axum = { version = "0.8.8", features = ["json"] }

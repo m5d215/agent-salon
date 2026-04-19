@@ -1,8 +1,8 @@
-# relay-mcp
+# agent-salon
 
-A lightweight HTTP-to-MCP notification bridge for Claude Code. External processes POST to a local HTTP endpoint, and messages are forwarded as channel notifications to every connected Claude Code session.
+A gathering place for Claude Code sessions. Multiple sessions — each running under a different role/persona — register with a label and talk to each other (or broadcast) through `notifications/claude/channel`. External processes can also drop messages in via a simple HTTP webhook.
 
-relay-mcp runs as a standalone long-running daemon that serves both the external webhook (`POST /notify`) and the MCP Streamable HTTP transport (`/mcp`) on a single port. Claude Code connects over HTTP, so multiple concurrent sessions can share the same relay.
+agent-salon runs as a standalone long-running daemon that serves both the MCP Streamable HTTP transport (`/mcp`) and an external webhook (`/notify`) on a single port.
 
 ## Requirements
 
@@ -17,19 +17,21 @@ cargo build --release
 
 ## Setup
 
-### 1. Start relay-mcp (daemon)
+### 1. Start agent-salon (daemon)
 
 ```bash
-./target/release/relay-mcp
+./target/release/agent-salon
 # → listening on http://127.0.0.1:9315
 ```
 
-Keep it running in a separate terminal / tmux pane / launchd job.
+Keep it running in a separate terminal / tmux pane / launchd job. One daemon per host is enough; every session on every machine that can reach the host uses the same salon.
 
 ### 2. Register as MCP server (HTTP transport)
 
+Each session you want to invite picks its own label and puts it on the `/mcp` URL:
+
 ```bash
-claude mcp add --scope project --transport http relay-mcp http://127.0.0.1:9315/mcp
+claude mcp add --scope project --transport http agent-salon 'http://127.0.0.1:9315/mcp?label=laptop-a'
 ```
 
 Or write `.mcp.json` directly:
@@ -37,13 +39,15 @@ Or write `.mcp.json` directly:
 ```json
 {
   "mcpServers": {
-    "relay-mcp": {
+    "agent-salon": {
       "type": "http",
-      "url": "http://127.0.0.1:9315/mcp"
+      "url": "http://127.0.0.1:9315/mcp?label=laptop-a"
     }
   }
 }
 ```
+
+`?label=` is how this session names itself to the rest of the salon. Pick something meaningful per project/role.
 
 ### 3. Enable channel notifications
 
@@ -60,14 +64,14 @@ Add to your settings file (`~/.claude/settings.json` or `.claude/settings.local.
 ### 4. Start Claude Code with channel flags
 
 ```bash
-claude --dangerously-load-development-channels server:relay-mcp
+claude --dangerously-load-development-channels server:agent-salon
 ```
 
 The `--dangerously-load-development-channels` flag is needed for non-plugin MCP servers. Without it, the server will be rejected as "not on the approved channels allowlist".
 
 ## Usage
 
-There are two ways to send a notification:
+There are two ways to drop a message into the salon:
 
 1. **From inside a Claude Code session** — call the `send_message` MCP tool. Schema-validated, no URL construction, and the sender identity is bound to the session's own label (no spoofing possible).
 2. **From an external process** (CI hook, shell script, webhook) — POST to `/notify` with a `?label=` query parameter.
@@ -109,7 +113,7 @@ The sender's identity lives in the URL (`?label=<name>`), **not in the body**. T
 If no session matches the target (or no session is connected at all), the message is dropped silently.
 
 ```bash
-# Minimal example — send to "laptop-a", claim to be "ci".
+# External process addressing a specific session.
 curl -X POST 'http://127.0.0.1:9315/notify?label=ci' \
   -H 'Content-Type: application/json' \
   -d '{"content":"Build finished","target":"laptop-a"}'
@@ -117,34 +121,21 @@ curl -X POST 'http://127.0.0.1:9315/notify?label=ci' \
 
 ### Labelling sessions
 
-Each Claude Code session can identify itself with a label via a `?label=<name>` query parameter on the `/mcp` URL. `POST /notify` with a matching `target` then fans out only to sessions wearing that label.
-
-```json
-{
-  "mcpServers": {
-    "relay-mcp": {
-      "type": "http",
-      "url": "http://127.0.0.1:9315/mcp?label=laptop-a"
-    }
-  }
-}
-```
-
-```bash
-# Only the "laptop-a" session(s) receive this:
-curl -X POST http://127.0.0.1:9315/notify \
-  -H 'Content-Type: application/json' \
-  -d '{"content":"Build finished","target":"laptop-a"}'
-```
-
 Multiple sessions can share a label — they form a group and every targeted notification fans out to all of them. Unlabeled sessions only receive broadcasts (notifications without `target`).
+
+### MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `salon_status` | Show HTTP endpoints, active sessions with labels, and message count. |
+| `send_message` | Deliver a channel notification to another session (or broadcast). |
 
 ### Configuration
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `RELAY_MCP_PORT` | `9315` | TCP port the daemon binds to |
-| `RELAY_MCP_BIND` | `127.0.0.1` | Bind address. Set to `0.0.0.0` (or a specific interface IP) to accept connections from other machines — e.g. over a Tailscale / VPN network. |
+| `AGENT_SALON_PORT` | `9315` | TCP port the daemon binds to |
+| `AGENT_SALON_BIND` | `127.0.0.1` | Bind address. Set to `0.0.0.0` (or a specific interface IP) to accept connections from other machines — e.g. over a Tailscale / VPN network. |
 
 ## Local testing
 
@@ -154,14 +145,14 @@ Without Claude Code, you can exercise the full pipeline standalone:
 ./scripts/test-server.sh
 ```
 
-The script spins up relay-mcp, runs through initialize / initialized / GET stream, POSTs a sample notification, and prints the resulting `notifications/claude/channel` event.
+The script spins up agent-salon, runs through initialize / initialized / GET stream, POSTs a sample notification, and prints the resulting `notifications/claude/channel` event.
 
 ## Architecture
 
 ```
-External Process                  relay-mcp (daemon)                 Claude Code
+External Process                agent-salon (daemon)                 Claude Code
      |                                  |                                 |
-     |  POST /notify (HTTP)             |                                 |
+     |  POST /notify?label=X (HTTP)     |                                 |
      |--------------------------------->|                                 |
      |  202 Accepted                    |                                 |
      |<---------------------------------|                                 |
@@ -171,7 +162,7 @@ External Process                  relay-mcp (daemon)                 Claude Code
      |                                  |                                 |  (wakes session)
 ```
 
-Internally, each connected Claude Code session is tracked as an `rmcp::Peer`. `POST /notify` broadcasts to every peer; peers that fail to send are pruned.
+Internally, each connected Claude Code session is tracked as a `Session { peer, label }`. Delivery filters by label (or fans out on broadcast). Sessions whose channel has closed are pruned lazily on the next send failure.
 
 ## Tech Stack
 
