@@ -3,7 +3,7 @@ use std::fmt::Write;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -12,6 +12,19 @@ use crate::db::{self, ListFilters, MessageRow};
 use crate::http::AppState;
 
 const PAGE_SIZE: i64 = 50;
+
+/// Timezone used for both rendering timestamps and interpreting
+/// `datetime-local` input on the filter form. Hardcoded to JST; this is a
+/// personal tool and the operator lives in +09:00.
+fn display_tz() -> FixedOffset {
+    FixedOffset::east_opt(9 * 3600).expect("valid offset")
+}
+
+fn format_ts(ts: DateTime<Utc>) -> String {
+    ts.with_timezone(&display_tz())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
 
 /// Query parameters for `GET /admin`. Mirrors `<form>` field names so the form
 /// just submits back to the same URL.
@@ -36,8 +49,8 @@ pub async fn list_page(
 ) -> Response {
     let source = q.source.clone().filter(|s| !s.is_empty());
     let target = q.target.clone().filter(|s| !s.is_empty());
-    let since = parse_local_datetime(q.since.as_deref());
-    let until = parse_local_datetime(q.until.as_deref());
+    let since = parse_display_datetime(q.since.as_deref());
+    let until = parse_display_datetime(q.until.as_deref());
 
     let page = q.page.unwrap_or(0).max(0);
     let filters = ListFilters {
@@ -88,16 +101,22 @@ fn render_error(msg: &str) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, Html(body)).into_response()
 }
 
-fn parse_local_datetime(s: Option<&str>) -> Option<DateTime<Utc>> {
+/// Parse a `datetime-local` input value as wall-clock time in `display_tz()`,
+/// then convert to UTC for the query.
+fn parse_display_datetime(s: Option<&str>) -> Option<DateTime<Utc>> {
     let s = s?.trim();
     if s.is_empty() {
         return None;
     }
     // datetime-local produces "YYYY-MM-DDTHH:MM" (or with seconds).
     let formats = ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"];
+    let tz = display_tz();
     for fmt in formats {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(naive.and_utc());
+            return naive
+                .and_local_timezone(tz)
+                .single()
+                .map(|dt| dt.with_timezone(&Utc));
         }
     }
     None
@@ -163,7 +182,7 @@ fn render_list_page(
             "<tr><td class=\"ts\"><a href=\"/admin/messages/{}\">{}</a></td>\
              <td>{}</td><td>{}</td><td class=\"content\">{}</td><td>{}</td></tr>",
             encode_double_quoted_attribute(&m.id.to_string()),
-            encode_text(&m.ts.to_rfc3339()),
+            encode_text(&format_ts(m.ts)),
             encode_text(m.via.as_str()),
             arrow,
             encode_text(&preview),
@@ -282,7 +301,7 @@ fn render_detail_page(m: &MessageRow) -> String {
         encode_text(&m.id.to_string())
     );
     let _ = writeln!(body, "<dl>");
-    row(&mut body, "ts", &m.ts.to_rfc3339());
+    row(&mut body, "ts", &format_ts(m.ts));
     row(&mut body, "via", m.via.as_str());
     row(&mut body, "source", &m.source);
     row(
