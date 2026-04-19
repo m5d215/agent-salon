@@ -90,11 +90,12 @@ curl -X POST http://127.0.0.1:9315/notify \
 
 Messages are broadcast to **every** connected Claude Code session. If no session is connected, the message is dropped.
 
-### Port configuration
+### Configuration
 
-| Method | Description |
-|--------|-------------|
-| `RELAY_MCP_PORT=9315` | Fixed port via environment variable (default) |
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `RELAY_MCP_PORT` | `9315` | TCP port the daemon binds to |
+| `RELAY_MCP_BIND` | `127.0.0.1` | Bind address. Set to `0.0.0.0` (or a specific interface IP) to accept connections from other machines — e.g. over a Tailscale / VPN network. |
 
 ## Local testing
 

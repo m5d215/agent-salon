@@ -71,6 +71,7 @@ Response:
 ## Configuration
 
 - `RELAY_MCP_PORT` — fixed port the daemon binds to (default `9315`).
+- `RELAY_MCP_BIND` — bind address (default `127.0.0.1`). Set to `0.0.0.0` or a Tailscale/VPN interface IP to accept connections from other machines.
 
 The server prints the listening port to stderr on startup.
 

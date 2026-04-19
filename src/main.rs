@@ -14,9 +14,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9315);
+    let bind = std::env::var("RELAY_MCP_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    let actual_port = listener.local_addr()?.port();
+    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
+    let actual_addr = listener.local_addr()?;
+    let actual_port = actual_addr.port();
 
     let state = Arc::new(RelayState::new(actual_port));
 
@@ -35,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .nest_service("/mcp", mcp_service);
 
-    eprintln!("relay-mcp listening on http://127.0.0.1:{actual_port}");
-    eprintln!("  notify: POST http://127.0.0.1:{actual_port}/notify");
-    eprintln!("  mcp:         http://127.0.0.1:{actual_port}/mcp");
+    eprintln!("relay-mcp listening on http://{actual_addr}");
+    eprintln!("  notify: POST http://{actual_addr}/notify");
+    eprintln!("  mcp:         http://{actual_addr}/mcp");
 
     axum::serve(listener, app).await?;
 
