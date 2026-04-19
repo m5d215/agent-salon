@@ -81,14 +81,39 @@ curl -X POST http://127.0.0.1:9315/notify \
 |-------|------|----------|-------------|
 | `content` | string | yes | Message body |
 | `source` | string | no | Sender identifier (e.g. "ci", "webhook") |
+| `target` | string | no | Session label to deliver to. If omitted, the notification is broadcast to every connected session. |
 | `meta` | object | no | Arbitrary key-value metadata |
 
 **Responses:**
 
-- `202 Accepted` -- notification queued for broadcast
+- `202 Accepted` -- notification queued for delivery
 - `422 Unprocessable Entity` -- missing or invalid body
 
-Messages are broadcast to **every** connected Claude Code session. If no session is connected, the message is dropped.
+If no session matches the target (or no session is connected at all), the message is dropped silently.
+
+### Labelling sessions
+
+Each Claude Code session can identify itself with a label via a `?label=<name>` query parameter on the `/mcp` URL. `POST /notify` with a matching `target` then fans out only to sessions wearing that label.
+
+```json
+{
+  "mcpServers": {
+    "relay-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:9315/mcp?label=laptop-a"
+    }
+  }
+}
+```
+
+```bash
+# Only the "laptop-a" session(s) receive this:
+curl -X POST http://127.0.0.1:9315/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Build finished","target":"laptop-a"}'
+```
+
+Multiple sessions can share a label — they form a group and every targeted notification fans out to all of them. Unlabeled sessions only receive broadcasts (notifications without `target`).
 
 ### Configuration
 
