@@ -95,15 +95,22 @@ pub struct SalonState {
     pub message_count: AtomicU64,
     pub sessions: Mutex<Vec<Session>>,
     pub db: SqlitePool,
+    /// Alias → real-label map applied to `target` in `deliver_notification`.
+    /// Lets a sender use an innocuous alias (e.g. `notes`) that resolves to
+    /// the real session label (e.g. `laptop-a`) so the real target is never
+    /// named in the sender's environment — useful when the sender runs under
+    /// a censored / observed LLM.
+    pub aliases: HashMap<String, String>,
 }
 
 impl SalonState {
-    pub fn new(port: u16, db: SqlitePool) -> Self {
+    pub fn new(port: u16, db: SqlitePool, aliases: HashMap<String, String>) -> Self {
         Self {
             port,
             message_count: AtomicU64::new(0),
             sessions: Mutex::new(Vec::new()),
             db,
+            aliases,
         }
     }
 }
@@ -317,10 +324,23 @@ pub async fn deliver_notification(
     let mut delivered_to: Vec<String> = Vec::new();
     let mut delivery_errors: Vec<String> = Vec::new();
 
+    // Resolve `target` through the alias map. Aliases win over real labels —
+    // if `target` matches an alias, only sessions wearing the aliased real
+    // label receive the notification. The resolved value is what we match
+    // against and what we persist; the fact that an alias was used is not
+    // recorded, so admin UI filters work on real labels uniformly.
+    let resolved_target: Option<String> = payload.target.as_deref().map(|t| {
+        state
+            .aliases
+            .get(t)
+            .cloned()
+            .unwrap_or_else(|| t.to_string())
+    });
+
     let mut sessions = state.sessions.lock().await;
     let mut alive = Vec::with_capacity(sessions.len());
     for session in sessions.drain(..) {
-        let matches = match &payload.target {
+        let matches = match &resolved_target {
             None => true,
             Some(target) => session.label.as_deref() == Some(target.as_str()),
         };
@@ -351,7 +371,7 @@ pub async fn deliver_notification(
         ts,
         via: ctx.via.unwrap_or(Via::Notify),
         source: payload.source.clone().unwrap_or_default(),
-        target: payload.target.clone(),
+        target: resolved_target,
         content: payload.content.clone(),
         meta: serde_json::Value::Object(meta.into_iter().collect()),
         delivered_to,
