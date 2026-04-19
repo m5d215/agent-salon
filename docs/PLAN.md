@@ -30,18 +30,21 @@ Claude Code's Discord plugin proves that `notifications/claude/channel` works fo
 ### HTTP Interface
 
 ```
-POST /notify
+POST /notify?label=<sender>
 Content-Type: application/json
 
 {
   "content": "string (required) — message body",
-  "source": "string (optional) — e.g. 'jira', 'slack', 'cron'. Falls back to ?label= on the request URL.",
   "target": "string (optional) — session label to deliver to; absent = broadcast",
   "meta": {
     // arbitrary key-value pairs, forwarded as-is
   }
 }
 ```
+
+`?label=` is required. Sender identity lives in the URL, not the body — the
+body is untrusted LLM/payload territory and must not be able to declare who
+it claims to be. `source` in the body is stripped.
 
 Response:
 - `202 Accepted` — notification sent
@@ -69,7 +72,7 @@ Each Claude Code session may identify itself with a label via a `?label=<name>` 
 
 `POST /notify` with a matching `target` fans out only to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. Multiple sessions sharing a label form an implicit group.
 
-Senders may likewise identify themselves with `?label=<name>` on the `/notify` URL. When `source` is absent from the POST body, relay-mcp falls back to the query label and stores it as `meta.source`. Body-level `source` wins when both are present.
+Senders identify themselves with `?label=<name>` on the `/notify` URL. This is required; `POST /notify` without a `?label=` returns 400. The value becomes `meta.source` on the outgoing notification. `source` in the JSON body is deliberately stripped (`#[serde(skip_deserializing)]`) so that an LLM-authored body cannot claim to be someone else.
 
 ### MCP Tools
 

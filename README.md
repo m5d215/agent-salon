@@ -75,28 +75,32 @@ curl -X POST http://127.0.0.1:9315/notify \
   -d '{"content": "Build finished", "source": "ci"}'
 ```
 
-### POST /notify
+### POST /notify?label=&lt;name&gt;
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `content` | string | yes | Message body |
-| `source` | string | no | Sender identifier (e.g. "ci", "webhook"). Surfaced to the receiver as the `source` attribute on the `<channel>` tag. If omitted, `?label=` on the request URL is used instead. |
-| `target` | string | no | Session label to deliver to. If omitted, the notification is broadcast to every connected session. |
-| `meta` | object | no | Arbitrary key-value metadata. Every key is passed through to the channel tag as an attribute. |
+The sender's identity lives in the URL (`?label=<name>`), **not in the body**. This is deliberate: the body is usually produced by an LLM or an automated process, and a body-declared `source` would let the payload spoof its own identity. Putting the label on the URL pushes identification into the transport layer, which is controlled by the calling environment (shell config, `.mcp.json`, CI secrets, etc.).
+
+| Location | Field | Type | Required | Description |
+|----------|-------|------|----------|-------------|
+| query | `label` | string | **yes** | Sender identifier. Surfaced to the receiver as `<channel source="...">`. |
+| body | `content` | string | yes | Message body |
+| body | `target` | string | no | Session label to deliver to. If omitted, the notification is broadcast to every connected session. |
+| body | `meta` | object | no | Arbitrary key-value metadata. Every key is passed through to the channel tag as an attribute. |
+
+`source` in the body is **ignored** (silently stripped). Use the query parameter.
 
 **Responses:**
 
-- `202 Accepted` -- notification queued for delivery
-- `422 Unprocessable Entity` -- missing or invalid body
+- `202 Accepted` — notification queued for delivery
+- `400 Bad Request` — `?label=` missing
+- `422 Unprocessable Entity` — missing or invalid body
 
 If no session matches the target (or no session is connected at all), the message is dropped silently.
 
-**Sender self-identification.** The sender can also name itself via `?label=<name>` on the `/notify` URL. When `source` is absent from the body, relay-mcp uses the query label as a fallback. Explicit body `source` always wins if present.
-
 ```bash
-# Equivalent:
-curl -X POST 'http://127.0.0.1:9315/notify?label=ci' -d '{"content":"..."}'
-curl -X POST 'http://127.0.0.1:9315/notify'          -d '{"content":"...","source":"ci"}'
+# Minimal example — send to "laptop-a", claim to be "ci".
+curl -X POST 'http://127.0.0.1:9315/notify?label=ci' \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Build finished","target":"laptop-a"}'
 ```
 
 ### Labelling sessions
