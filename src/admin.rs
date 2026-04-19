@@ -34,6 +34,13 @@ pub struct ListQuery {
     pub source: Option<String>,
     #[serde(default)]
     pub target: Option<String>,
+    /// Conversation filter: each of these must appear as either source or
+    /// target. With both set, pulls up every message exchanged between the
+    /// two participants (both directions).
+    #[serde(default)]
+    pub participant_a: Option<String>,
+    #[serde(default)]
+    pub participant_b: Option<String>,
     /// ISO-like local datetime: `YYYY-MM-DDTHH:MM` (datetime-local input).
     #[serde(default)]
     pub since: Option<String>,
@@ -49,6 +56,8 @@ pub async fn list_page(
 ) -> Response {
     let source = q.source.clone().filter(|s| !s.is_empty());
     let target = q.target.clone().filter(|s| !s.is_empty());
+    let participant_a = q.participant_a.clone().filter(|s| !s.is_empty());
+    let participant_b = q.participant_b.clone().filter(|s| !s.is_empty());
     let since = parse_display_datetime(q.since.as_deref());
     let until = parse_display_datetime(q.until.as_deref());
 
@@ -56,6 +65,8 @@ pub async fn list_page(
     let filters = ListFilters {
         source: source.clone(),
         target: target.clone(),
+        participant_a: participant_a.clone(),
+        participant_b: participant_b.clone(),
         since,
         until,
         limit: PAGE_SIZE,
@@ -73,8 +84,11 @@ pub async fn list_page(
     let targets = db::distinct_labels(&state.salon.db, "target")
         .await
         .unwrap_or_default();
+    let participants = db::distinct_participants(&state.salon.db)
+        .await
+        .unwrap_or_default();
 
-    let html = render_list_page(&q, &messages, total, page, &sources, &targets);
+    let html = render_list_page(&q, &messages, total, page, &sources, &targets, &participants);
     Html(html).into_response()
 }
 
@@ -129,13 +143,29 @@ fn render_list_page(
     page: i64,
     sources: &[String],
     targets: &[String],
+    participants: &[String],
 ) -> String {
     let mut body = String::new();
     let _ = writeln!(body, "{STYLE}");
     let _ = writeln!(body, "<h1>agent-salon &middot; messages</h1>");
     let _ = writeln!(body, "<form method=\"get\" action=\"/admin\" class=\"filters\">");
+
+    // Conversation filter (bidirectional, both must be involved).
+    let _ = writeln!(body, "<fieldset class=\"group\"><legend>conversation</legend>");
+    render_select(&mut body, "participant_a", q.participant_a.as_deref(), participants);
+    let _ = writeln!(body, "<span class=\"sep\">&harr;</span>");
+    render_select(&mut body, "participant_b", q.participant_b.as_deref(), participants);
+    let _ = writeln!(body, "</fieldset>");
+
+    // One-directional filter.
+    let _ = writeln!(body, "<fieldset class=\"group\"><legend>one-way</legend>");
     render_select(&mut body, "source", q.source.as_deref(), sources);
+    let _ = writeln!(body, "<span class=\"sep\">&rarr;</span>");
     render_select(&mut body, "target", q.target.as_deref(), targets);
+    let _ = writeln!(body, "</fieldset>");
+
+    // Time range.
+    let _ = writeln!(body, "<fieldset class=\"group\"><legend>time (JST)</legend>");
     let _ = writeln!(
         body,
         "<label>since<input type=\"datetime-local\" name=\"since\" value=\"{}\"></label>",
@@ -146,9 +176,11 @@ fn render_list_page(
         "<label>until<input type=\"datetime-local\" name=\"until\" value=\"{}\"></label>",
         encode_double_quoted_attribute(q.until.as_deref().unwrap_or(""))
     );
+    let _ = writeln!(body, "</fieldset>");
+
     let _ = writeln!(
         body,
-        "<button type=\"submit\">apply</button> <a href=\"/admin\">reset</a>"
+        "<div class=\"buttons\"><button type=\"submit\">apply</button> <a href=\"/admin\">reset</a></div>"
     );
     let _ = writeln!(body, "</form>");
 
@@ -239,26 +271,19 @@ fn render_select(body: &mut String, name: &str, current: Option<&str>, options: 
 
 fn pagination_url(q: &ListQuery, page: i64) -> String {
     let mut pairs: Vec<(&str, String)> = Vec::new();
-    if let Some(s) = &q.source {
-        if !s.is_empty() {
-            pairs.push(("source", s.clone()));
+    let push_non_empty = |pairs: &mut Vec<(&'static str, String)>, k: &'static str, v: &Option<String>| {
+        if let Some(s) = v {
+            if !s.is_empty() {
+                pairs.push((k, s.clone()));
+            }
         }
-    }
-    if let Some(t) = &q.target {
-        if !t.is_empty() {
-            pairs.push(("target", t.clone()));
-        }
-    }
-    if let Some(s) = &q.since {
-        if !s.is_empty() {
-            pairs.push(("since", s.clone()));
-        }
-    }
-    if let Some(u) = &q.until {
-        if !u.is_empty() {
-            pairs.push(("until", u.clone()));
-        }
-    }
+    };
+    push_non_empty(&mut pairs, "source", &q.source);
+    push_non_empty(&mut pairs, "target", &q.target);
+    push_non_empty(&mut pairs, "participant_a", &q.participant_a);
+    push_non_empty(&mut pairs, "participant_b", &q.participant_b);
+    push_non_empty(&mut pairs, "since", &q.since);
+    push_non_empty(&mut pairs, "until", &q.until);
     pairs.push(("page", page.to_string()));
     let qs: Vec<String> = pairs
         .iter()
@@ -368,16 +393,24 @@ const STYLE: &str = r#"<!doctype html>
   body { font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
          margin: 1.5rem; color: #222; background: #fafafa; }
   h1 { margin-top: 0; font-weight: 600; }
-  .filters { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: flex-end;
-             padding: 0.75rem 1rem; background: #fff; border: 1px solid #e2e2e2;
+  .filters { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: flex-end;
+             padding: 0.5rem 0.75rem 0.75rem; background: #fff; border: 1px solid #e2e2e2;
              border-radius: 6px; margin-bottom: 1rem; }
+  .filters .group { display: flex; gap: 0.5rem; align-items: flex-end;
+                    border: 1px solid #e8e8e8; border-radius: 6px;
+                    padding: 0.25rem 0.75rem 0.5rem; margin: 0; }
+  .filters .group legend { font-size: 0.7rem; color: #888; padding: 0 0.25rem;
+                           text-transform: uppercase; letter-spacing: 0.03em; }
+  .filters .sep { align-self: center; color: #888; padding-bottom: 0.35rem; }
   .filters label { display: flex; flex-direction: column; font-size: 0.8rem;
                    color: #555; gap: 0.15rem; }
   .filters input, .filters select { padding: 0.3rem 0.45rem; border: 1px solid #ccc;
                                     border-radius: 4px; font: inherit; }
+  .filters .buttons { display: flex; align-items: center; gap: 0.75rem;
+                      padding-bottom: 0.1rem; }
   .filters button { padding: 0.35rem 0.9rem; background: #1a73e8; color: #fff;
                     border: 0; border-radius: 4px; cursor: pointer; }
-  .filters a { margin-left: 0.25rem; color: #1a73e8; }
+  .filters a { color: #1a73e8; }
   .meta { color: #666; font-size: 0.85rem; }
   table { width: 100%; border-collapse: collapse; background: #fff; }
   th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee;

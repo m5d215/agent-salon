@@ -123,51 +123,69 @@ pub async fn insert_message(pool: &SqlitePool, row: &MessageRow) -> Result<(), s
 /// Filters for the admin UI message list.
 #[derive(Debug, Default)]
 pub struct ListFilters {
+    /// One-directional filter: sender label.
     pub source: Option<String>,
+    /// One-directional filter: target label.
     pub target: Option<String>,
+    /// Conversation filter. Each participant (if set) must be either source
+    /// or target of the message. With both set this selects every message
+    /// exchanged between the two participants, in either direction.
+    pub participant_a: Option<String>,
+    pub participant_b: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub limit: i64,
     pub offset: i64,
 }
 
+/// Build the WHERE clause and bind the values. Shared between list and count.
+fn build_where(f: &ListFilters) -> (String, Vec<String>) {
+    let mut sql = String::from("WHERE 1=1");
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(s) = &f.source {
+        sql.push_str(" AND source = ?");
+        binds.push(s.clone());
+    }
+    if let Some(t) = &f.target {
+        sql.push_str(" AND target = ?");
+        binds.push(t.clone());
+    }
+    if let Some(a) = &f.participant_a {
+        sql.push_str(" AND (source = ? OR target = ?)");
+        binds.push(a.clone());
+        binds.push(a.clone());
+    }
+    if let Some(b) = &f.participant_b {
+        sql.push_str(" AND (source = ? OR target = ?)");
+        binds.push(b.clone());
+        binds.push(b.clone());
+    }
+    if let Some(s) = f.since {
+        sql.push_str(" AND ts >= ?");
+        binds.push(s.to_rfc3339());
+    }
+    if let Some(u) = f.until {
+        sql.push_str(" AND ts <= ?");
+        binds.push(u.to_rfc3339());
+    }
+    (sql, binds)
+}
+
 pub async fn list_messages(
     pool: &SqlitePool,
     f: &ListFilters,
 ) -> Result<Vec<MessageRow>, sqlx::Error> {
-    let mut sql = String::from(
+    let (where_clause, binds) = build_where(f);
+    let sql = format!(
         "SELECT id, ts, via, source, target, content, meta, delivered_to, delivery_errors, \
-         sender_addr, sender_session_id FROM messages WHERE 1=1",
+         sender_addr, sender_session_id FROM messages {where_clause} \
+         ORDER BY ts DESC LIMIT ? OFFSET ?"
     );
-    if f.source.is_some() {
-        sql.push_str(" AND source = ?");
-    }
-    if f.target.is_some() {
-        sql.push_str(" AND target = ?");
-    }
-    if f.since.is_some() {
-        sql.push_str(" AND ts >= ?");
-    }
-    if f.until.is_some() {
-        sql.push_str(" AND ts <= ?");
-    }
-    sql.push_str(" ORDER BY ts DESC LIMIT ? OFFSET ?");
-
     let mut q = sqlx::query(&sql);
-    if let Some(s) = &f.source {
-        q = q.bind(s);
-    }
-    if let Some(t) = &f.target {
-        q = q.bind(t);
-    }
-    if let Some(s) = f.since {
-        q = q.bind(s.to_rfc3339());
-    }
-    if let Some(u) = f.until {
-        q = q.bind(u.to_rfc3339());
+    for b in &binds {
+        q = q.bind(b);
     }
     q = q.bind(f.limit).bind(f.offset);
-
     let rows = q.fetch_all(pool).await?;
     rows.iter().map(row_to_message).collect()
 }
@@ -176,31 +194,11 @@ pub async fn count_messages(
     pool: &SqlitePool,
     f: &ListFilters,
 ) -> Result<i64, sqlx::Error> {
-    let mut sql = String::from("SELECT COUNT(*) as c FROM messages WHERE 1=1");
-    if f.source.is_some() {
-        sql.push_str(" AND source = ?");
-    }
-    if f.target.is_some() {
-        sql.push_str(" AND target = ?");
-    }
-    if f.since.is_some() {
-        sql.push_str(" AND ts >= ?");
-    }
-    if f.until.is_some() {
-        sql.push_str(" AND ts <= ?");
-    }
+    let (where_clause, binds) = build_where(f);
+    let sql = format!("SELECT COUNT(*) as c FROM messages {where_clause}");
     let mut q = sqlx::query(&sql);
-    if let Some(s) = &f.source {
-        q = q.bind(s);
-    }
-    if let Some(t) = &f.target {
-        q = q.bind(t);
-    }
-    if let Some(s) = f.since {
-        q = q.bind(s.to_rfc3339());
-    }
-    if let Some(u) = f.until {
-        q = q.bind(u.to_rfc3339());
+    for b in &binds {
+        q = q.bind(b);
     }
     let row = q.fetch_one(pool).await?;
     Ok(row.get::<i64, _>("c"))
@@ -232,6 +230,21 @@ pub async fn distinct_labels(
     );
     let rows = sqlx::query(&sql).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| r.get::<String, _>(column)).collect())
+}
+
+/// Union of every label that has ever appeared as either sender or target.
+/// Populates the conversation filter dropdowns.
+pub async fn distinct_participants(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT label FROM ( \
+             SELECT source AS label FROM messages \
+             UNION \
+             SELECT target AS label FROM messages WHERE target IS NOT NULL \
+         ) ORDER BY label",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("label")).collect())
 }
 
 fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<MessageRow, sqlx::Error> {
