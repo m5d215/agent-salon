@@ -35,7 +35,7 @@ Content-Type: application/json
 
 {
   "content": "string (required) — message body",
-  "source": "string (optional) — e.g. 'jira', 'slack', 'cron'",
+  "source": "string (optional) — e.g. 'jira', 'slack', 'cron'. Falls back to ?label= on the request URL.",
   "target": "string (optional) — session label to deliver to; absent = broadcast",
   "meta": {
     // arbitrary key-value pairs, forwarded as-is
@@ -68,6 +68,8 @@ Response:
 Each Claude Code session may identify itself with a label via a `?label=<name>` query parameter on the `/mcp` URL. Labels are captured on `notifications/initialized` from the injected `http::request::Parts` and stored alongside the `Peer` in the session registry.
 
 `POST /notify` with a matching `target` fans out only to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. Multiple sessions sharing a label form an implicit group.
+
+Senders may likewise identify themselves with `?label=<name>` on the `/notify` URL. When `source` is absent from the POST body, relay-mcp falls back to the query label and stores it as `meta.source`. Body-level `source` wins when both are present.
 
 ### MCP Tools
 

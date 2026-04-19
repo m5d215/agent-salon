@@ -80,9 +80,9 @@ curl -X POST http://127.0.0.1:9315/notify \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `content` | string | yes | Message body |
-| `source` | string | no | Sender identifier (e.g. "ci", "webhook") |
+| `source` | string | no | Sender identifier (e.g. "ci", "webhook"). Surfaced to the receiver as the `source` attribute on the `<channel>` tag. If omitted, `?label=` on the request URL is used instead. |
 | `target` | string | no | Session label to deliver to. If omitted, the notification is broadcast to every connected session. |
-| `meta` | object | no | Arbitrary key-value metadata |
+| `meta` | object | no | Arbitrary key-value metadata. Every key is passed through to the channel tag as an attribute. |
 
 **Responses:**
 
@@ -90,6 +90,14 @@ curl -X POST http://127.0.0.1:9315/notify \
 - `422 Unprocessable Entity` -- missing or invalid body
 
 If no session matches the target (or no session is connected at all), the message is dropped silently.
+
+**Sender self-identification.** The sender can also name itself via `?label=<name>` on the `/notify` URL. When `source` is absent from the body, relay-mcp uses the query label as a fallback. Explicit body `source` always wins if present.
+
+```bash
+# Equivalent:
+curl -X POST 'http://127.0.0.1:9315/notify?label=ci' -d '{"content":"..."}'
+curl -X POST 'http://127.0.0.1:9315/notify'          -d '{"content":"...","source":"ci"}'
+```
 
 ### Labelling sessions
 
