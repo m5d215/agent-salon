@@ -10,7 +10,7 @@ A gathering place for Claude Code sessions. Every session (each running under a 
 │ slack-poller │              │ agent-salon  │                         ├──────────────┤
 │ curl / CI    │              │   (daemon)   │                         │ laptop-b     │
 └──────────────┘              │              │                         ├──────────────┤
-                              │ Session      │  send_message tool      │ persona-c          │
+                              │ Session      │  send_message tool      │ persona-c    │
                               │ registry:    │◀────────────────────────│              │
                               │ Vec<Session> │────────────────────────▶│ …            │
                               └──────────────┘                         └──────────────┘
