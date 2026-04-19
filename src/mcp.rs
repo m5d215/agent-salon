@@ -20,6 +20,69 @@ use uuid::Uuid;
 use crate::db::{self, MessageRow, Via};
 use crate::http::NotifyPayload;
 
+/// Protocol guidance delivered to every MCP client at `initialize`.
+/// Kept here (not inlined) because it is the primary mechanism by which
+/// peer sessions learn the conventions of the salon.
+const INSTRUCTIONS: &str = r#"agent-salon is a gathering place for Claude Code sessions. Each session
+registers with a label and can exchange `notifications/claude/channel`
+messages with the other sessions currently connected.
+
+## Your session
+- You are labelled by the `?label=<name>` you used to connect on the /mcp URL.
+- Other sessions can direct a message at you by targeting that label.
+- Unlabelled sessions can receive broadcasts but cannot be targeted and
+  cannot call `send_message`.
+
+## Sending
+Use the `send_message` tool:
+- `content` (required): the message body shown to the recipient.
+- `target` (optional): the recipient's label. Omit to broadcast.
+- `meta` (optional): key/value object. Every key becomes an attribute on
+  the recipient's `<channel>` tag.
+
+Your identity (`source`) is injected automatically from your own label.
+It cannot be overridden from tool arguments — the transport layer owns
+the claim of who you are.
+
+## Receiving
+Incoming notifications appear in your conversation as:
+
+    <channel source="agent-salon" source="<sender-label>" id="<uuid>"
+             ts="<rfc3339>" kind="..." ...>
+      content...
+    </channel>
+
+The outer `source="agent-salon"` is the server; the second `source` is
+the sender's label — that is the one that identifies your peer. Use
+the `id` attribute to reference the message in a reply.
+
+## Canonical meta keys
+Prefer these keys when you can, so messages interoperate across sessions:
+
+- `id`         UUID of this message. Injected by agent-salon — receivers
+               echo it back via `reply_to` to thread a conversation.
+- `reply_to`   The `id` of the message this one answers. Set it whenever
+               you respond to a specific earlier message.
+- `kind`       Message type. Suggested values:
+               - `info`     FYI, no reply expected.
+               - `status`   state update (build done, task complete, …).
+               - `ack`      acknowledges an earlier message (use `reply_to`).
+               - `request`  asks the recipient to do something.
+               - `question` asks for information; expect a `reply`.
+               - `reply`    answers an earlier question/request (use `reply_to`).
+- `priority`   `low` | `normal` | `high` | `urgent`.
+- `topic`      Free-form thread label for grouping related messages.
+- `commit`     Git commit hash when announcing code changes.
+
+These are conventions, not enforcement — unknown keys pass through
+unchanged, but peers may not know how to react to them.
+
+## Discovery
+Call the `salon_status` tool to see which sessions are currently online
+and what labels they hold. That list is the ground truth for who you
+can target.
+"#;
+
 /// A connected MCP session and its user-supplied label (from `?label=` query).
 pub struct Session {
     pub peer: Peer<RoleServer>,
@@ -174,13 +237,7 @@ impl ServerHandler for SalonHandler {
         );
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("agent-salon", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "agent-salon: a gathering place for Claude Code sessions. \
-                 Connect with ?label=<name> on the /mcp URL to register your session. \
-                 Use the `send_message` tool to deliver notifications to other labelled \
-                 sessions (or broadcast). External processes can also POST to the \
-                 /notify?label=<name> HTTP endpoint.",
-            )
+            .with_instructions(INSTRUCTIONS)
     }
 
     async fn on_initialized(&self, ctx: NotificationContext<RoleServer>) {
@@ -230,6 +287,7 @@ pub async fn deliver_notification(
     payload: &NotifyPayload,
     ctx: DeliveryContext,
 ) {
+    let id = Uuid::now_v7();
     let ts = Utc::now();
     let meta = {
         let mut map = payload.meta.clone().unwrap_or_default();
@@ -240,6 +298,9 @@ pub async fn deliver_notification(
             "ts".into(),
             serde_json::Value::String(ts.to_rfc3339()),
         );
+        // Inject the message id so the receiver sees it as a <channel id="..."> attribute
+        // and can refer back to it in `reply_to`.
+        map.insert("id".into(), serde_json::Value::String(id.to_string()));
         map
     };
 
@@ -286,7 +347,7 @@ pub async fn deliver_notification(
     drop(sessions);
 
     let row = MessageRow {
-        id: Uuid::now_v7(),
+        id,
         ts,
         via: ctx.via.unwrap_or(Via::Notify),
         source: payload.source.clone().unwrap_or_default(),
