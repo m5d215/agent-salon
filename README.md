@@ -1,6 +1,8 @@
 # relay-mcp
 
-A lightweight HTTP-to-MCP notification bridge for Claude Code. External processes POST to a local HTTP endpoint, and messages are forwarded as channel notifications to the active Claude Code session.
+A lightweight HTTP-to-MCP notification bridge for Claude Code. External processes POST to a local HTTP endpoint, and messages are forwarded as channel notifications to every connected Claude Code session.
+
+relay-mcp runs as a standalone long-running daemon that serves both the external webhook (`POST /notify`) and the MCP Streamable HTTP transport (`/mcp`) on a single port. Claude Code connects over HTTP, so multiple concurrent sessions can share the same relay.
 
 ## Requirements
 
@@ -15,17 +17,35 @@ cargo build --release
 
 ## Setup
 
-### 1. Register as MCP server
+### 1. Start relay-mcp (daemon)
 
 ```bash
-# Project scope (recommended)
-claude mcp add --scope project relay-mcp -- /path/to/relay-mcp/target/release/relay-mcp
-
-# Or user scope (all projects)
-claude mcp add --scope user relay-mcp -- /path/to/relay-mcp/target/release/relay-mcp
+./target/release/relay-mcp
+# → listening on http://127.0.0.1:9315
 ```
 
-### 2. Enable channel notifications
+Keep it running in a separate terminal / tmux pane / launchd job.
+
+### 2. Register as MCP server (HTTP transport)
+
+```bash
+claude mcp add --scope project --transport http relay-mcp http://127.0.0.1:9315/mcp
+```
+
+Or write `.mcp.json` directly:
+
+```json
+{
+  "mcpServers": {
+    "relay-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:9315/mcp"
+    }
+  }
+}
+```
+
+### 3. Enable channel notifications
 
 **Both are required.** Channel notifications are off by default in Claude Code.
 
@@ -37,7 +57,7 @@ Add to your settings file (`~/.claude/settings.json` or `.claude/settings.local.
 }
 ```
 
-### 3. Start Claude Code with channel flags
+### 4. Start Claude Code with channel flags
 
 ```bash
 claude --dangerously-load-development-channels server:relay-mcp
@@ -47,7 +67,7 @@ The `--dangerously-load-development-channels` flag is needed for non-plugin MCP 
 
 ## Usage
 
-With the session running, send notifications via HTTP:
+With relay-mcp running and a Claude Code session connected, send notifications via HTTP:
 
 ```bash
 curl -X POST http://127.0.0.1:9315/notify \
@@ -65,49 +85,46 @@ curl -X POST http://127.0.0.1:9315/notify \
 
 **Responses:**
 
-- `202 Accepted` -- notification sent
+- `202 Accepted` -- notification queued for broadcast
 - `422 Unprocessable Entity` -- missing or invalid body
+
+Messages are broadcast to **every** connected Claude Code session. If no session is connected, the message is dropped.
 
 ### Port configuration
 
 | Method | Description |
 |--------|-------------|
-| `RELAY_MCP_PORT=9315` | Fixed port via environment variable |
-| (unset) | OS assigns an available port |
+| `RELAY_MCP_PORT=9315` | Fixed port via environment variable (default) |
 
 ## Local testing
 
-Without Claude Code, you can test the MCP server standalone:
+Without Claude Code, you can exercise the full pipeline standalone:
 
 ```bash
 ./scripts/test-server.sh
 ```
 
-Then POST from another terminal:
-
-```bash
-jq -nc '{ content: "hello", source: "test"}' \
-  | curl -fsS http://127.0.0.1:9315/notify \
-    -H 'Content-Type: application/json' -d @-
-```
-
-The MCP JSON-RPC notification will appear on stdout.
+The script spins up relay-mcp, runs through initialize / initialized / GET stream, POSTs a sample notification, and prints the resulting `notifications/claude/channel` event.
 
 ## Architecture
 
 ```
-External Process                relay-mcp                    Claude Code
-     |                            |                              |
-     |  POST /notify (HTTP)       |                              |
-     |--------------------------->|                              |
-     |  202 Accepted              |                              |
-     |<---------------------------|                              |
-     |                            |  notifications/claude/channel (stdio)
-     |                            |----------------------------->|
-     |                            |                              |  (wakes session)
+External Process                  relay-mcp (daemon)                 Claude Code
+     |                                  |                                 |
+     |  POST /notify (HTTP)             |                                 |
+     |--------------------------------->|                                 |
+     |  202 Accepted                    |                                 |
+     |<---------------------------------|                                 |
+     |                                  |  notifications/claude/channel   |
+     |                                  |  (MCP Streamable HTTP / SSE)    |
+     |                                  |-------------------------------->|
+     |                                  |                                 |  (wakes session)
 ```
+
+Internally, each connected Claude Code session is tracked as an `rmcp::Peer`. `POST /notify` broadcasts to every peer; peers that fail to send are pruned.
 
 ## Tech Stack
 
 - **Rust** with `rmcp` (official MCP SDK), `axum`, `tokio`
-- Single binary, ~4 MB, ~2-5 MB memory at idle
+- MCP Streamable HTTP server (`rmcp::transport::streamable_http_server`)
+- Single binary, long-running daemon

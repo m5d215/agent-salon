@@ -1,65 +1,45 @@
 mod http;
 mod mcp;
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use mcp::{RelayHandler, RelayState};
-use rmcp::ServiceExt;
-use tokio::sync::mpsc;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port: u16 = std::env::var("RELAY_MCP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(9315);
 
-    // Bind HTTP listener early to resolve the actual port.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let actual_port = listener.local_addr()?.port();
 
-    let state = Arc::new(RelayState {
-        port: actual_port,
-        message_count: AtomicU64::new(0),
-    });
+    let state = Arc::new(RelayState::new(actual_port));
 
-    // Channel: HTTP handler -> MCP notification forwarder.
-    let (tx, mut rx) = mpsc::channel::<http::NotifyPayload>(256);
+    // MCP service: stateful streamable HTTP, fresh handler per session.
+    let mcp_service = StreamableHttpService::new(
+        {
+            let state = state.clone();
+            move || Ok(RelayHandler::new(state.clone()))
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
 
-    // Start MCP server on stdio.
-    let handler = RelayHandler::new(state.clone());
-    let service = handler.serve(rmcp::transport::io::stdio()).await?;
-    let peer = service.peer().clone();
-
-    eprintln!("relay-mcp HTTP listening on http://127.0.0.1:{actual_port}");
-
-    // Start HTTP server.
     let app = http::router(http::AppState {
         relay: state.clone(),
-        tx,
-    });
-    let http_handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
-    });
+    })
+    .nest_service("/mcp", mcp_service);
 
-    // Forward HTTP payloads as MCP notifications.
-    let notify_handle = tokio::spawn(async move {
-        while let Some(payload) = rx.recv().await {
-            if let Err(e) = mcp::send_notification(&peer, &payload).await {
-                eprintln!("relay-mcp: notification error: {e}");
-            }
-        }
-    });
+    eprintln!("relay-mcp listening on http://127.0.0.1:{actual_port}");
+    eprintln!("  notify: POST http://127.0.0.1:{actual_port}/notify");
+    eprintln!("  mcp:         http://127.0.0.1:{actual_port}/mcp");
 
-    // Block until MCP session ends (Claude Code closes stdin).
-    service
-        .waiting()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-
-    http_handle.abort();
-    notify_handle.abort();
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

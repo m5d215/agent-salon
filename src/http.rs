@@ -1,15 +1,14 @@
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 
-use crate::mcp::RelayState;
+use crate::mcp::{self, RelayState};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotifyPayload {
@@ -21,7 +20,6 @@ pub struct NotifyPayload {
 #[derive(Clone)]
 pub struct AppState {
     pub relay: Arc<RelayState>,
-    pub tx: mpsc::Sender<NotifyPayload>,
 }
 
 pub async fn handle_notify(
@@ -29,7 +27,11 @@ pub async fn handle_notify(
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
     state.relay.message_count.fetch_add(1, Ordering::Relaxed);
-    let _ = state.tx.try_send(payload);
+    // Spawn so the HTTP response returns immediately.
+    let relay = state.relay.clone();
+    tokio::spawn(async move {
+        mcp::broadcast_notification(&relay, &payload).await;
+    });
     StatusCode::ACCEPTED
 }
 

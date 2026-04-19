@@ -1,11 +1,13 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
     CustomNotification, Implementation, ServerCapabilities, ServerInfo, ServerNotification,
 };
-use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceError};
+use rmcp::service::NotificationContext;
+use rmcp::{Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router};
+use tokio::sync::Mutex;
 
 use crate::http::NotifyPayload;
 
@@ -13,6 +15,21 @@ use crate::http::NotifyPayload;
 pub struct RelayState {
     pub port: u16,
     pub message_count: AtomicU64,
+    pub sessions: Mutex<Vec<Peer<RoleServer>>>,
+}
+
+impl RelayState {
+    pub fn new(port: u16) -> Self {
+        Self {
+            port,
+            message_count: AtomicU64::new(0),
+            sessions: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn session_count(&self) -> usize {
+        self.sessions.lock().await.len()
+    }
 }
 
 pub struct RelayHandler {
@@ -32,8 +49,14 @@ impl RelayHandler {
     #[tool(description = "Show HTTP endpoint URL, port, and message count")]
     async fn relay_status(&self) -> String {
         let count = self.state.message_count.load(Ordering::Relaxed);
+        let sessions = self.state.session_count().await;
         let port = self.state.port;
-        format!("HTTP endpoint: http://localhost:{port}/notify\nMessages relayed: {count}")
+        format!(
+            "Notify endpoint:  http://127.0.0.1:{port}/notify\n\
+             MCP endpoint:     http://127.0.0.1:{port}/mcp\n\
+             Active sessions:  {sessions}\n\
+             Messages relayed: {count}"
+        )
     }
 }
 
@@ -51,25 +74,26 @@ impl ServerHandler for RelayHandler {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("relay-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-            "relay-mcp: HTTP-to-MCP notification bridge. \
-             External processes POST to the HTTP endpoint, \
-             and messages are forwarded as notifications to this session.",
-        )
+                "relay-mcp: HTTP-to-MCP notification bridge. \
+                 External processes POST to the HTTP endpoint, \
+                 and messages are forwarded as notifications to this session.",
+            )
+    }
+
+    async fn on_initialized(&self, ctx: NotificationContext<RoleServer>) {
+        let mut sessions = self.state.sessions.lock().await;
+        sessions.push(ctx.peer);
+        eprintln!("relay-mcp: session initialized ({} active)", sessions.len());
     }
 }
 
-/// Send a notification to the connected Claude Code session.
-pub async fn send_notification(
-    peer: &rmcp::Peer<rmcp::RoleServer>,
-    payload: &NotifyPayload,
-) -> Result<(), ServiceError> {
+/// Broadcast a notification to every connected session.
+/// Sessions whose channel has closed are removed.
+pub async fn broadcast_notification(state: &RelayState, payload: &NotifyPayload) {
     let meta = {
         let mut map = payload.meta.clone().unwrap_or_default();
         if let Some(source) = &payload.source {
-            map.insert(
-                "source".into(),
-                serde_json::Value::String(source.clone()),
-            );
+            map.insert("source".into(), serde_json::Value::String(source.clone()));
         }
         map.insert(
             "ts".into(),
@@ -83,8 +107,18 @@ pub async fn send_notification(
         "meta": meta,
     });
 
-    peer.send_notification(ServerNotification::CustomNotification(
-        CustomNotification::new("notifications/claude/channel", Some(params)),
-    ))
-    .await
+    let notification = ServerNotification::CustomNotification(CustomNotification::new(
+        "notifications/claude/channel",
+        Some(params),
+    ));
+
+    let mut sessions = state.sessions.lock().await;
+    let mut alive = Vec::with_capacity(sessions.len());
+    for peer in sessions.drain(..) {
+        match peer.send_notification(notification.clone()).await {
+            Ok(()) => alive.push(peer),
+            Err(e) => eprintln!("relay-mcp: dropping session (send failed): {e}"),
+        }
+    }
+    *sessions = alive;
 }

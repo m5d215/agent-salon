@@ -21,10 +21,11 @@ Claude Code's Discord plugin proves that `notifications/claude/channel` works fo
 
 ### MCP Server (core)
 
-- **Transport**: stdio (standard MCP server, spawned by Claude Code)
-- **HTTP endpoint**: localhost, configurable port
-- **Single responsibility**: receive HTTP POST, emit MCP notification
+- **Transport**: Streamable HTTP (daemon; Claude Code connects by URL)
+- **Single port** serves both the external webhook (`POST /notify`) and the MCP endpoint (`/mcp`)
+- **Single responsibility**: receive HTTP POST, broadcast MCP notification to every connected session
 - **Capabilities**: `tools` + `experimental: { "claude/channel": {} }` (required for Claude Code to accept channel notifications)
+- **Sessions**: tracked as `Vec<Peer<RoleServer>>`; a peer is registered on `notifications/initialized` and pruned lazily when a send fails.
 
 ### HTTP Interface
 
@@ -69,9 +70,7 @@ Response:
 
 ## Configuration
 
-Port selection strategy (in order):
-1. `RELAY_MCP_PORT` environment variable
-2. Auto-select available port
+- `RELAY_MCP_PORT` — fixed port the daemon binds to (default `9315`).
 
 The server prints the listening port to stderr on startup.
 
@@ -108,15 +107,19 @@ relay-mcp/
 
 ## Example Usage
 
-### 1. Register as MCP server
+### 1. Start the daemon
 
 ```bash
-claude mcp add --scope project relay-mcp \
-  -e RELAY_MCP_PORT=9315 \
-  -- /path/to/relay-mcp/target/release/relay-mcp
+./target/release/relay-mcp
 ```
 
-### 2. Start Claude Code
+### 2. Register as MCP server (HTTP transport)
+
+```bash
+claude mcp add --scope project --transport http relay-mcp http://127.0.0.1:9315/mcp
+```
+
+### 3. Start Claude Code
 
 ```bash
 claude --dangerously-load-development-channels server:relay-mcp
