@@ -79,6 +79,7 @@ Senders identify themselves with `?label=<name>` on the `/notify` URL. This is r
 | Tool | Description |
 |------|-------------|
 | `relay_status` | Show HTTP endpoint URL, port, active sessions with labels, and message count |
+| `send_message` | Send a `notifications/claude/channel` to another session (or broadcast). The `source` attribute is taken from the calling session's own `?label=` and cannot be overridden. Sessions without a label cannot call this tool (`-32602`). |
 
 ## Configuration
 

@@ -1,12 +1,17 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CustomNotification, Implementation, ServerCapabilities, ServerInfo, ServerNotification,
+    CustomNotification, ErrorData, Implementation, ServerCapabilities, ServerInfo,
+    ServerNotification,
 };
 use rmcp::service::NotificationContext;
 use rmcp::{Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::http::NotifyPayload;
@@ -36,7 +41,26 @@ impl RelayState {
 
 pub struct RelayHandler {
     state: Arc<RelayState>,
+    /// This session's own label, captured from `?label=` on the /mcp URL at
+    /// initialize time. Used as the `source` when this session sends a
+    /// notification via the `send_message` tool.
+    self_label: Arc<Mutex<Option<String>>>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Tool parameters for `send_message`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendMessageParams {
+    /// Message body. Shown to the receiver inside the <channel> tag.
+    pub content: String,
+    /// Target session label. If omitted, the notification is broadcast to
+    /// every connected session.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Optional metadata. Every key becomes an attribute on the receiver's
+    /// <channel> tag (e.g. `{"kind": "ack"}` -> `<channel kind="ack">`).
+    #[serde(default)]
+    pub meta: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[tool_router]
@@ -44,6 +68,7 @@ impl RelayHandler {
     pub fn new(state: Arc<RelayState>) -> Self {
         Self {
             state,
+            self_label: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -74,6 +99,41 @@ impl RelayHandler {
             total = sessions.len(),
         )
     }
+
+    #[tool(
+        description = "Send a channel notification to another session (or broadcast). \
+                       The sender identity (source) is taken from this session's own label \
+                       and cannot be overridden. Requires this session to have been \
+                       initialized with ?label=<name> on the /mcp URL."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(params): Parameters<SendMessageParams>,
+    ) -> Result<String, ErrorData> {
+        let source = self.self_label.lock().await.clone();
+        let Some(source) = source else {
+            return Err(ErrorData::invalid_params(
+                "This session has no label. Reconnect with ?label=<name> on the /mcp URL \
+                 before calling send_message.",
+                None,
+            ));
+        };
+
+        self.state.message_count.fetch_add(1, Ordering::Relaxed);
+        let target_for_reply = params.target.clone();
+        let payload = NotifyPayload {
+            content: params.content,
+            target: params.target,
+            meta: params.meta,
+            source: Some(source),
+        };
+        deliver_notification(&self.state, &payload).await;
+
+        Ok(match target_for_reply {
+            Some(t) => format!("delivered to sessions labelled '{t}'"),
+            None => "broadcast to all connected sessions".to_string(),
+        })
+    }
 }
 
 #[tool_handler]
@@ -90,10 +150,11 @@ impl ServerHandler for RelayHandler {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("relay-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "relay-mcp: HTTP-to-MCP notification bridge. \
-                 External processes POST to the HTTP endpoint, \
-                 and messages are forwarded as notifications to this session. \
-                 Set ?label=<name> on the /mcp URL to receive targeted notifications.",
+                "relay-mcp: HTTP-to-MCP notification bridge and inter-session messaging. \
+                 Connect with ?label=<name> on the /mcp URL to register your session. \
+                 Use the `send_message` tool to deliver notifications to other labelled \
+                 sessions (or broadcast). External processes can also POST to the \
+                 /notify?label=<name> HTTP endpoint.",
             )
     }
 
@@ -103,6 +164,8 @@ impl ServerHandler for RelayHandler {
             .get::<http::request::Parts>()
             .and_then(|parts| parts.uri.query())
             .and_then(extract_label);
+
+        *self.self_label.lock().await = label.clone();
 
         let mut sessions = self.state.sessions.lock().await;
         sessions.push(Session {

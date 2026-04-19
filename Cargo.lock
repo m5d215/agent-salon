@@ -716,6 +716,7 @@ dependencies = [
  "chrono",
  "http",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",

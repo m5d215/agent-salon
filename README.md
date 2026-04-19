@@ -67,13 +67,25 @@ The `--dangerously-load-development-channels` flag is needed for non-plugin MCP 
 
 ## Usage
 
-With relay-mcp running and a Claude Code session connected, send notifications via HTTP:
+There are two ways to send a notification:
 
-```bash
-curl -X POST http://127.0.0.1:9315/notify \
-  -H 'Content-Type: application/json' \
-  -d '{"content": "Build finished", "source": "ci"}'
+1. **From inside a Claude Code session** — call the `send_message` MCP tool. Schema-validated, no URL construction, and the sender identity is bound to the session's own label (no spoofing possible).
+2. **From an external process** (CI hook, shell script, webhook) — POST to `/notify` with a `?label=` query parameter.
+
+### MCP tool: `send_message`
+
+Any connected session that was initialized with `?label=<name>` can call:
+
+```jsonc
+// tools/call arguments
+{
+  "content": "Build finished",           // required
+  "target":  "laptop-a",                 // optional; omit to broadcast
+  "meta":    { "commit": "abc123" }      // optional; each key becomes a <channel> attribute
+}
 ```
+
+The sender (`source`) is taken from the calling session's own `?label=` and cannot be overridden from the tool arguments. A session without a label receives `-32602 Invalid Params` if it tries to call `send_message`.
 
 ### POST /notify?label=&lt;name&gt;
 
