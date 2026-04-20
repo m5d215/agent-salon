@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9315);
-    let bind = std::env::var("AGENT_SALON_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let bind = std::env::var("AGENT_SALON_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
     let db_path =
         std::env::var("AGENT_SALON_DB").unwrap_or_else(|_| "./agent-salon.db".to_string());
     let aliases = std::env::var("AGENT_SALON_ALIASES")

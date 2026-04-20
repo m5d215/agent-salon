@@ -134,7 +134,7 @@ Multiple sessions can share a label — they form a group and every targeted not
 
 `GET /admin` renders a plain HTML page listing every persisted message. Filter by `source` / `target` / time range, page through history, click a row for full detail (content, full `meta` JSON, `delivered_to`, `delivery_errors`, `sender_addr`, `sender_session_id`).
 
-The UI has no authentication — it relies on the surrounding network layer (loopback bind by default, or a Tailscale ACL when `AGENT_SALON_BIND=0.0.0.0`).
+The UI has no authentication — it relies on the surrounding network layer (default bind is `0.0.0.0`, so restrict exposure via firewall or a Tailscale / VPN ACL; set `AGENT_SALON_BIND=127.0.0.1` to keep it loopback-only).
 
 ### Persistence
 
@@ -163,7 +163,7 @@ No retention policy — the table accumulates. Rotate manually when needed.
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `AGENT_SALON_PORT` | `9315` | TCP port the daemon binds to |
-| `AGENT_SALON_BIND` | `127.0.0.1` | Bind address. Set to `0.0.0.0` (or a specific interface IP) to accept connections from other machines — e.g. over a Tailscale / VPN network. |
+| `AGENT_SALON_BIND` | `0.0.0.0` | Bind address. Default accepts connections on every interface (agent-salon has no auth — rely on a firewall or Tailscale / VPN ACL). Set to `127.0.0.1` to restrict to loopback. |
 | `AGENT_SALON_DB` | `./agent-salon.db` | SQLite database path. Created on first run. |
 | `AGENT_SALON_ALIASES` | `` | Comma-separated `alias:real_label` pairs. When a sender specifies `target: <alias>`, the daemon routes to sessions labelled `<real_label>` instead. Useful when a sender runs in a censored / observed environment and the real target label should not appear in the sender's `.mcp.json`, conversation, or logs. Aliases take precedence over real labels of the same name. |
 
