@@ -26,6 +26,33 @@ fn format_ts(ts: DateTime<Utc>) -> String {
         .to_string()
 }
 
+/// Collapse repeated labels into `label ×N`, preserving first-seen order.
+/// The raw list in the DB can contain the same label multiple times when one
+/// label has multiple active sessions — each session gets its own copy.
+fn summarize_labels(labels: &[String]) -> String {
+    let mut order: Vec<&str> = Vec::new();
+    let mut counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for l in labels {
+        let key = l.as_str();
+        if counts.insert(key, counts.get(key).copied().unwrap_or(0) + 1).is_none() {
+            order.push(key);
+        }
+    }
+    order
+        .into_iter()
+        .map(|k| {
+            let n = counts[k];
+            if n > 1 {
+                format!("{k} \u{00d7}{n}")
+            } else {
+                k.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Query parameters for `GET /admin`. Mirrors `<form>` field names so the form
 /// just submits back to the same URL.
 #[derive(Debug, Default, Deserialize)]
@@ -207,7 +234,7 @@ fn render_list_page(
         let delivered = if m.delivered_to.is_empty() {
             "—".to_string()
         } else {
-            m.delivered_to.join(", ")
+            summarize_labels(&m.delivered_to)
         };
         let _ = writeln!(
             body,
@@ -340,7 +367,7 @@ fn render_detail_page(m: &MessageRow) -> String {
         &if m.delivered_to.is_empty() {
             "(none)".into()
         } else {
-            m.delivered_to.join(", ")
+            summarize_labels(&m.delivered_to)
         },
     );
     row(
@@ -349,7 +376,7 @@ fn render_detail_page(m: &MessageRow) -> String {
         &if m.delivery_errors.is_empty() {
             "(none)".into()
         } else {
-            m.delivery_errors.join(", ")
+            summarize_labels(&m.delivery_errors)
         },
     );
     row(
