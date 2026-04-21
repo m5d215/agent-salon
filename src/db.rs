@@ -52,7 +52,7 @@ impl Via {
 pub async fn open(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     // If the file doesn't exist yet, create it.
     if db_path != ":memory:" && !Path::new(db_path).exists() {
-        std::fs::File::create(db_path).map_err(|e| sqlx::Error::Io(e))?;
+        std::fs::File::create(db_path).map_err(sqlx::Error::Io)?;
     }
     let options = SqliteConnectOptions::from_str(db_path)?.create_if_missing(true);
     let pool = SqlitePoolOptions::new()
@@ -190,10 +190,7 @@ pub async fn list_messages(
     rows.iter().map(row_to_message).collect()
 }
 
-pub async fn count_messages(
-    pool: &SqlitePool,
-    f: &ListFilters,
-) -> Result<i64, sqlx::Error> {
+pub async fn count_messages(pool: &SqlitePool, f: &ListFilters) -> Result<i64, sqlx::Error> {
     let (where_clause, binds) = build_where(f);
     let sql = format!("SELECT COUNT(*) as c FROM messages {where_clause}");
     let mut q = sqlx::query(&sql);
@@ -204,10 +201,7 @@ pub async fn count_messages(
     Ok(row.get::<i64, _>("c"))
 }
 
-pub async fn get_message(
-    pool: &SqlitePool,
-    id: Uuid,
-) -> Result<Option<MessageRow>, sqlx::Error> {
+pub async fn get_message(pool: &SqlitePool, id: Uuid) -> Result<Option<MessageRow>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, ts, via, source, target, content, meta, delivered_to, delivery_errors, \
          sender_addr, sender_session_id FROM messages WHERE id = ?",

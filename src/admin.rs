@@ -31,11 +31,13 @@ fn format_ts(ts: DateTime<Utc>) -> String {
 /// label has multiple active sessions — each session gets its own copy.
 fn summarize_labels(labels: &[String]) -> String {
     let mut order: Vec<&str> = Vec::new();
-    let mut counts: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for l in labels {
         let key = l.as_str();
-        if counts.insert(key, counts.get(key).copied().unwrap_or(0) + 1).is_none() {
+        if counts
+            .insert(key, counts.get(key).copied().unwrap_or(0) + 1)
+            .is_none()
+        {
             order.push(key);
         }
     }
@@ -77,10 +79,7 @@ pub struct ListQuery {
     pub page: Option<i64>,
 }
 
-pub async fn list_page(
-    State(state): State<AppState>,
-    Query(q): Query<ListQuery>,
-) -> Response {
+pub async fn list_page(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
     let source = q.source.clone().filter(|s| !s.is_empty());
     let target = q.target.clone().filter(|s| !s.is_empty());
     let participant_a = q.participant_a.clone().filter(|s| !s.is_empty());
@@ -104,7 +103,9 @@ pub async fn list_page(
         Ok(m) => m,
         Err(e) => return render_error(&format!("query failed: {e}")),
     };
-    let total = db::count_messages(&state.salon.db, &filters).await.unwrap_or(0);
+    let total = db::count_messages(&state.salon.db, &filters)
+        .await
+        .unwrap_or(0);
     let sources = db::distinct_labels(&state.salon.db, "source")
         .await
         .unwrap_or_default();
@@ -115,14 +116,19 @@ pub async fn list_page(
         .await
         .unwrap_or_default();
 
-    let html = render_list_page(&q, &messages, total, page, &sources, &targets, &participants);
+    let html = render_list_page(
+        &q,
+        &messages,
+        total,
+        page,
+        &sources,
+        &targets,
+        &participants,
+    );
     Html(html).into_response()
 }
 
-pub async fn detail_page(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn detail_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let Ok(uuid) = Uuid::parse_str(&id) else {
         return (StatusCode::BAD_REQUEST, "invalid id").into_response();
     };
@@ -135,10 +141,7 @@ pub async fn detail_page(
 }
 
 fn render_error(msg: &str) -> Response {
-    let body = format!(
-        "{STYLE}\n<h1>error</h1><pre>{}</pre>",
-        encode_text(msg)
-    );
+    let body = format!("{STYLE}\n<h1>error</h1><pre>{}</pre>", encode_text(msg));
     (StatusCode::INTERNAL_SERVER_ERROR, Html(body)).into_response()
 }
 
@@ -175,13 +178,29 @@ fn render_list_page(
     let mut body = String::new();
     let _ = writeln!(body, "{STYLE}");
     let _ = writeln!(body, "<h1>agent-salon &middot; messages</h1>");
-    let _ = writeln!(body, "<form method=\"get\" action=\"/admin\" class=\"filters\">");
+    let _ = writeln!(
+        body,
+        "<form method=\"get\" action=\"/admin\" class=\"filters\">"
+    );
 
     // Conversation filter (bidirectional, both must be involved).
-    let _ = writeln!(body, "<fieldset class=\"group\"><legend>conversation</legend>");
-    render_select(&mut body, "participant_a", q.participant_a.as_deref(), participants);
+    let _ = writeln!(
+        body,
+        "<fieldset class=\"group\"><legend>conversation</legend>"
+    );
+    render_select(
+        &mut body,
+        "participant_a",
+        q.participant_a.as_deref(),
+        participants,
+    );
     let _ = writeln!(body, "<span class=\"sep\">&harr;</span>");
-    render_select(&mut body, "participant_b", q.participant_b.as_deref(), participants);
+    render_select(
+        &mut body,
+        "participant_b",
+        q.participant_b.as_deref(),
+        participants,
+    );
     let _ = writeln!(body, "</fieldset>");
 
     // One-directional filter.
@@ -192,7 +211,10 @@ fn render_list_page(
     let _ = writeln!(body, "</fieldset>");
 
     // Time range.
-    let _ = writeln!(body, "<fieldset class=\"group\"><legend>time (JST)</legend>");
+    let _ = writeln!(
+        body,
+        "<fieldset class=\"group\"><legend>time (JST)</legend>"
+    );
     let _ = writeln!(
         body,
         "<label>since<input type=\"datetime-local\" name=\"since\" value=\"{}\"></label>",
@@ -298,13 +320,14 @@ fn render_select(body: &mut String, name: &str, current: Option<&str>, options: 
 
 fn pagination_url(q: &ListQuery, page: i64) -> String {
     let mut pairs: Vec<(&str, String)> = Vec::new();
-    let push_non_empty = |pairs: &mut Vec<(&'static str, String)>, k: &'static str, v: &Option<String>| {
-        if let Some(s) = v {
-            if !s.is_empty() {
+    let push_non_empty =
+        |pairs: &mut Vec<(&'static str, String)>, k: &'static str, v: &Option<String>| {
+            if let Some(s) = v
+                && !s.is_empty()
+            {
                 pairs.push((k, s.clone()));
             }
-        }
-    };
+        };
     push_non_empty(&mut pairs, "source", &q.source);
     push_non_empty(&mut pairs, "target", &q.target);
     push_non_empty(&mut pairs, "participant_a", &q.participant_a);
@@ -396,11 +419,7 @@ fn render_detail_page(m: &MessageRow) -> String {
         encode_text(&m.content)
     );
     let pretty = serde_json::to_string_pretty(&m.meta).unwrap_or_default();
-    let _ = writeln!(
-        body,
-        "<h2>meta</h2><pre>{}</pre>",
-        encode_text(&pretty)
-    );
+    let _ = writeln!(body, "<h2>meta</h2><pre>{}</pre>", encode_text(&pretty));
     body
 }
 
