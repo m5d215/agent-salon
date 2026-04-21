@@ -243,15 +243,16 @@ impl ServerHandler for SalonHandler {
             .unwrap(),
         );
         ServerInfo::new(capabilities)
-            .with_server_info(Implementation::new("agent-salon", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "agent-salon",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(INSTRUCTIONS)
     }
 
     async fn on_initialized(&self, ctx: NotificationContext<RoleServer>) {
         let parts = ctx.extensions.get::<http::request::Parts>();
-        let label = parts
-            .and_then(|p| p.uri.query())
-            .and_then(extract_label);
+        let label = parts.and_then(|p| p.uri.query()).and_then(extract_label);
         let session_id = parts
             .and_then(|p| p.headers.get("mcp-session-id"))
             .and_then(|v| v.to_str().ok())
@@ -301,10 +302,7 @@ pub async fn deliver_notification(
         if let Some(source) = &payload.source {
             map.insert("source".into(), serde_json::Value::String(source.clone()));
         }
-        map.insert(
-            "ts".into(),
-            serde_json::Value::String(ts.to_rfc3339()),
-        );
+        map.insert("ts".into(), serde_json::Value::String(ts.to_rfc3339()));
         // Inject the message id so the receiver sees it as a <channel id="..."> attribute
         // and can refer back to it in `reply_to`.
         map.insert("id".into(), serde_json::Value::String(id.to_string()));
