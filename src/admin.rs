@@ -70,6 +70,11 @@ pub struct ListQuery {
     pub participant_a: Option<String>,
     #[serde(default)]
     pub participant_b: Option<String>,
+    /// Comma-separated list of labels to hide. A message is hidden when any
+    /// listed label equals its source or target. Labels don't contain commas,
+    /// so a plain `split(',')` is sufficient.
+    #[serde(default)]
+    pub exclude: Option<String>,
     /// ISO-like local datetime: `YYYY-MM-DDTHH:MM` (datetime-local input).
     #[serde(default)]
     pub since: Option<String>,
@@ -84,6 +89,7 @@ pub async fn list_page(State(state): State<AppState>, Query(q): Query<ListQuery>
     let target = q.target.clone().filter(|s| !s.is_empty());
     let participant_a = q.participant_a.clone().filter(|s| !s.is_empty());
     let participant_b = q.participant_b.clone().filter(|s| !s.is_empty());
+    let exclude = parse_exclude(q.exclude.as_deref());
     let since = parse_display_datetime(q.since.as_deref());
     let until = parse_display_datetime(q.until.as_deref());
 
@@ -93,6 +99,7 @@ pub async fn list_page(State(state): State<AppState>, Query(q): Query<ListQuery>
         target: target.clone(),
         participant_a: participant_a.clone(),
         participant_b: participant_b.clone(),
+        exclude: exclude.clone(),
         since,
         until,
         limit: PAGE_SIZE,
@@ -143,6 +150,26 @@ pub async fn detail_page(State(state): State<AppState>, Path(id): Path<String>) 
 fn render_error(msg: &str) -> Response {
     let body = format!("{STYLE}\n<h1>error</h1><pre>{}</pre>", encode_text(msg));
     (StatusCode::INTERNAL_SERVER_ERROR, Html(body)).into_response()
+}
+
+/// Split the comma-separated `exclude` form field into distinct labels,
+/// preserving first-seen order. Empty entries (stray commas / trailing
+/// separators) are dropped.
+fn parse_exclude(s: Option<&str>) -> Vec<String> {
+    let Some(s) = s else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in s.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|e| e == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
 }
 
 /// Parse a `datetime-local` input value as wall-clock time in `display_tz()`,
@@ -208,6 +235,16 @@ fn render_list_page(
     render_select(&mut body, "source", q.source.as_deref(), sources);
     let _ = writeln!(body, "<span class=\"sep\">&rarr;</span>");
     render_select(&mut body, "target", q.target.as_deref(), targets);
+    let _ = writeln!(body, "</fieldset>");
+
+    // Exclusion filter — hide messages where any listed label is a participant.
+    let _ = writeln!(body, "<fieldset class=\"group\"><legend>hide</legend>");
+    let _ = writeln!(
+        body,
+        "<label>labels<input type=\"text\" name=\"exclude\" \
+         placeholder=\"comma-separated\" value=\"{}\"></label>",
+        encode_double_quoted_attribute(q.exclude.as_deref().unwrap_or(""))
+    );
     let _ = writeln!(body, "</fieldset>");
 
     // Time range.
@@ -332,6 +369,7 @@ fn pagination_url(q: &ListQuery, page: i64) -> String {
     push_non_empty(&mut pairs, "target", &q.target);
     push_non_empty(&mut pairs, "participant_a", &q.participant_a);
     push_non_empty(&mut pairs, "participant_b", &q.participant_b);
+    push_non_empty(&mut pairs, "exclude", &q.exclude);
     push_non_empty(&mut pairs, "since", &q.since);
     push_non_empty(&mut pairs, "until", &q.until);
     pairs.push(("page", page.to_string()));

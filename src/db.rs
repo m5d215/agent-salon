@@ -132,6 +132,10 @@ pub struct ListFilters {
     /// exchanged between the two participants, in either direction.
     pub participant_a: Option<String>,
     pub participant_b: Option<String>,
+    /// Hide any message where one of these labels is either source or target
+    /// (i.e. the label is a participant in that communication). Broadcasts
+    /// — where `target IS NULL` — are only excluded if the source matches.
+    pub exclude: Vec<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub limit: i64,
@@ -159,6 +163,11 @@ fn build_where(f: &ListFilters) -> (String, Vec<String>) {
         sql.push_str(" AND (source = ? OR target = ?)");
         binds.push(b.clone());
         binds.push(b.clone());
+    }
+    for x in &f.exclude {
+        sql.push_str(" AND source <> ? AND (target IS NULL OR target <> ?)");
+        binds.push(x.clone());
+        binds.push(x.clone());
     }
     if let Some(s) = f.since {
         sql.push_str(" AND ts >= ?");

@@ -91,7 +91,7 @@ Every delivery is persisted to a SQLite database. The schema captures enough to 
 
 `GET /admin` serves a plain HTML listing (no JS framework, no auth beyond network reachability). `GET /admin/messages/{id}` shows the full detail of a single row.
 
-Filters on the list page: `source`, `target`, `since`, `until`. Pagination at 50/page. No full-text search — the goal is "see who's been talking to whom", not grep.
+Filters on the list page: `source`, `target`, `participant_a`/`participant_b` (bidirectional conversation), `exclude` (comma-separated labels to hide — matches source or target), `since`, `until`. Pagination at 50/page. No full-text search — the goal is "see who's been talking to whom", not grep.
 
 ## Configuration
 
