@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CustomNotification, ErrorData, Implementation, ServerCapabilities, ServerInfo,
@@ -134,7 +133,6 @@ pub struct SalonHandler {
     /// initialize time. Stored on each persisted message so tool-originated
     /// rows carry the session id of the caller.
     self_session_id: Arc<Mutex<Option<String>>>,
-    tool_router: ToolRouter<Self>,
 }
 
 /// Tool parameters for `send_message`.
@@ -159,7 +157,6 @@ impl SalonHandler {
             state,
             self_label: Arc::new(Mutex::new(None)),
             self_session_id: Arc::new(Mutex::new(None)),
-            tool_router: Self::tool_router(),
         }
     }
 
