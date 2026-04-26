@@ -25,6 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|s| parse_aliases(&s))
         .unwrap_or_default();
+    let allowed_hosts = std::env::var("AGENT_SALON_ALLOWED_HOSTS")
+        .ok()
+        .map(|s| parse_allowed_hosts(&s))
+        .unwrap_or_default();
 
     let pool = db::open(&db_path).await?;
     eprintln!("agent-salon: db at {db_path}");
@@ -32,6 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Count only — do not log the alias → real mapping, to avoid leaving
         // the real labels in plain-text logs that may be shipped elsewhere.
         eprintln!("agent-salon: {} target alias(es) loaded", aliases.len());
+    }
+    if !allowed_hosts.is_empty() {
+        eprintln!("agent-salon: allowed hosts: {}", allowed_hosts.join(", "));
     }
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
@@ -41,13 +48,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(SalonState::new(actual_port, pool, aliases));
 
     // MCP service: stateful streamable HTTP, fresh handler per session.
+    let mut mcp_config = StreamableHttpServerConfig::default();
+    if !allowed_hosts.is_empty() {
+        mcp_config = mcp_config.with_allowed_hosts(allowed_hosts);
+    }
     let mcp_service = StreamableHttpService::new(
         {
             let state = state.clone();
             move || Ok(SalonHandler::new(state.clone()))
         },
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        mcp_config,
     );
 
     let app = http::router(http::AppState {
@@ -67,6 +78,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     Ok(())
+}
+
+/// Parse `AGENT_SALON_ALLOWED_HOSTS` of the form `host,host:port,...`.
+/// Whitespace around entries is trimmed; empty entries are skipped. The
+/// returned list is fed into `StreamableHttpServerConfig::with_allowed_hosts`,
+/// which performs the actual authority parsing.
+fn parse_allowed_hosts(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter_map(|h| {
+            let h = h.trim();
+            if h.is_empty() { None } else { Some(h.to_string()) }
+        })
+        .collect()
 }
 
 /// Parse `AGENT_SALON_ALIASES` of the form `alias:real,alias2:real2`.
@@ -92,7 +116,25 @@ fn parse_aliases(s: &str) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_aliases;
+    use super::{parse_aliases, parse_allowed_hosts};
+
+    #[test]
+    fn parses_allowed_hosts_csv() {
+        let h = parse_allowed_hosts("localhost, 127.0.0.1, example.com:8080");
+        assert_eq!(h, vec!["localhost", "127.0.0.1", "example.com:8080"]);
+    }
+
+    #[test]
+    fn skips_empty_allowed_hosts_entries() {
+        let h = parse_allowed_hosts(" , localhost ,, ");
+        assert_eq!(h, vec!["localhost"]);
+    }
+
+    #[test]
+    fn empty_allowed_hosts_input_yields_empty_vec() {
+        assert!(parse_allowed_hosts("").is_empty());
+        assert!(parse_allowed_hosts("   ,  ").is_empty());
+    }
 
     #[test]
     fn parses_simple_pairs() {
