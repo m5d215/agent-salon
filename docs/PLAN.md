@@ -28,7 +28,7 @@ Claude Code's Discord plugin proves that `notifications/claude/channel` works fo
 - **Single port** serves both the external webhook (`POST /notify`) and the MCP endpoint (`/mcp`)
 - **Responsibilities**: (a) receive webhook POSTs and forward them as channel notifications, (b) let connected sessions send channel notifications to one another via the `send_message` tool.
 - **Capabilities**: `tools` + `experimental: { "claude/channel": {} }` (required for Claude Code to accept channel notifications)
-- **Sessions**: tracked as `Vec<Session { peer, label }>`; a peer is registered on `notifications/initialized` and pruned lazily when a send fails.
+- **Sessions**: tracked as `Vec<Session { peer, label }>`; a peer is registered on `notifications/initialized`. A new session with a label already in use evicts the prior owner (label = identity, single live owner); orphaned peers without a same-label reconnect are pruned lazily on the next send failure.
 
 ### HTTP Interface
 
@@ -74,7 +74,7 @@ Response:
 
 Each Claude Code session may identify itself with a label via a `?label=<name>` query parameter on the `/mcp` URL. Labels are captured on `notifications/initialized` from the injected `http::request::Parts` and stored alongside the `Peer` in the session registry.
 
-Delivery with a matching `target` fans out only to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. Multiple sessions sharing a label form an implicit group.
+Delivery with a matching `target` fans out to sessions wearing that label. No `target` → broadcast. Unlabeled sessions only receive broadcasts. A label identifies a single live session: when a new connection initializes with a label already held, the prior session is evicted from the registry and its peer stops receiving messages. This keeps `/clear`-induced ghosts and stale `claude -p` one-shots from accumulating, at the cost of supporting "shared label as a group".
 
 Senders identify themselves with `?label=<name>` on the `/notify` URL. This is required; `POST /notify` without a `?label=` returns 400. The value becomes `meta.source` on the outgoing notification. `source` in the JSON body is deliberately stripped (`#[serde(skip_deserializing)]`) so that an LLM-authored body cannot claim to be someone else.
 
@@ -185,7 +185,7 @@ PROJ-123 assigned to you
 
 - Authentication / token-based access control (today the only protection is network reachability — e.g. Tailscale ACLs)
 - Queue / persistence (if no session matches, messages are dropped)
-- Active session health-check (stale peers are pruned lazily on send failure, not proactively)
+- Active session health-check / liveness probe (orphaned peers without a same-label reconnect are pruned lazily on send failure, not proactively)
 - Built-in pollers (Jira, Slack, etc.) — these remain separate CLIs that POST to agent-salon
 
 ## Reference

@@ -121,7 +121,7 @@ curl -X POST 'http://127.0.0.1:9315/notify?label=ci' \
 
 ### Labelling sessions
 
-Multiple sessions can share a label — they form a group and every targeted notification fans out to all of them. Unlabeled sessions only receive broadcasts (notifications without `target`).
+A label is identity, not a group key — only one connection can hold a given label at a time. Reconnecting with a label already in use (after Claude Code's `/clear`, or when a `claude -p` one-shot uses the same label as an interactive session) evicts the prior owner; the older session stops receiving messages. Pick distinct labels for sessions that need to coexist. Unlabeled sessions only receive broadcasts (notifications without `target`) and cannot call `send_message`.
 
 ### MCP tools
 
@@ -208,7 +208,7 @@ External Process                agent-salon (daemon)                 Claude Code
      |                                  |                                 |  (wakes session)
 ```
 
-Internally, each connected Claude Code session is tracked as a `Session { peer, label }`. Delivery filters by label (or fans out on broadcast). Sessions whose channel has closed are pruned lazily on the next send failure.
+Internally, each connected Claude Code session is tracked as a `Session { peer, label }`. Delivery filters by label (or fans out on broadcast). When a new session initializes with a label already held by another session, the prior session is evicted from the registry on the spot; sessions whose channel closed without a same-label reconnect are pruned lazily on the next send failure.
 
 ## Tech Stack
 
