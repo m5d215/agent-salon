@@ -1,6 +1,6 @@
 [package]
 name = "agent-salon"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A gathering place for Claude Code sessions — targeted channel-notification messaging between agents, plus an HTTP webhook inbox."
 license = "MIT"
