@@ -259,14 +259,27 @@ impl ServerHandler for SalonHandler {
         *self.self_session_id.lock().await = session_id.clone();
 
         let mut sessions = self.state.sessions.lock().await;
+        // Treat label as identity: a new connection with the same label evicts
+        // any prior session holding it. Reconnects (e.g. Claude Code's /clear)
+        // would otherwise pile up ghost entries that only get pruned on a
+        // failed send. Unlabeled sessions are left alone — they can't be
+        // targeted, so duplicates do no harm.
+        let evicted = if let Some(new_label) = label.as_deref() {
+            let before = sessions.len();
+            sessions.retain(|s| s.label.as_deref() != Some(new_label));
+            before - sessions.len()
+        } else {
+            0
+        };
         sessions.push(Session {
             peer: ctx.peer,
             label: label.clone(),
         });
         eprintln!(
-            "agent-salon: session initialized (label={}, {} active)",
+            "agent-salon: session initialized (label={}, {} active, evicted {})",
             label.as_deref().unwrap_or("<unlabeled>"),
-            sessions.len()
+            sessions.len(),
+            evicted,
         );
     }
 }
