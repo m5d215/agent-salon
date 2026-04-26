@@ -167,6 +167,27 @@ No retention policy — the table accumulates. Rotate manually when needed.
 | `AGENT_SALON_DB` | `./agent-salon.db` | SQLite database path. Created on first run. |
 | `AGENT_SALON_ALIASES` | `` | Comma-separated `alias:real_label` pairs. When a sender specifies `target: <alias>`, the daemon routes to sessions labelled `<real_label>` instead. Useful when a sender runs in a censored / observed environment and the real target label should not appear in the sender's `.mcp.json`, conversation, or logs. Aliases take precedence over real labels of the same name. |
 | `AGENT_SALON_ALLOWED_HOSTS` | `` (use rmcp default: `localhost,127.0.0.1,::1`) | Comma-separated `host` or `host:port` authorities allowed in the inbound `Host` header. The MCP transport (`rmcp`) rejects mismatching hosts with `403 Forbidden` to mitigate DNS rebinding. When clients reach the daemon over a Tailnet / VPN / reverse proxy hostname (anything other than loopback), list those names here. Empty value keeps the rmcp default. |
+| `AGENT_SALON_CONFIG` | `` (no config file) | Optional path to a `KEY=VALUE` config file. Useful when the daemon runs under a process supervisor (`brew services`, `systemd`, `launchd`) where injecting host-specific env vars is awkward — point this at a file the supervisor can keep stable, and edit values there. Process env always wins over the file. See [Config file](#config-file) below. |
+
+### Config file
+
+When `AGENT_SALON_CONFIG` points at an existing file, agent-salon reads it on startup and uses each `KEY=VALUE` line as a fallback for the same-named env var. The live process environment always takes precedence — the file just fills in keys that are not already set.
+
+Format:
+
+- One `KEY=VALUE` per line
+- Lines starting with `#` and blank lines are ignored
+- Surrounding double quotes around the value (`KEY="value"`) are stripped — useful when the value contains commas or `=`
+- Keys without `=` and lines with an empty key are silently skipped
+
+```ini
+# /opt/homebrew/etc/agent-salon.conf
+AGENT_SALON_BIND=0.0.0.0
+AGENT_SALON_ALLOWED_HOSTS="my-host.tailXXXXXX.ts.net,localhost,127.0.0.1"
+AGENT_SALON_ALIASES="notes:laptop-a,drafts:home-mac"
+```
+
+The Homebrew formula sets `AGENT_SALON_CONFIG=${HOMEBREW_PREFIX}/etc/agent-salon.conf` by default, so editing that file (and `brew services restart agent-salon`) is enough to apply host-specific settings without touching the generated `launchd` plist.
 
 ### Target aliases
 
