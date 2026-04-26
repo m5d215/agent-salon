@@ -88,7 +88,11 @@ fn parse_allowed_hosts(s: &str) -> Vec<String> {
     s.split(',')
         .filter_map(|h| {
             let h = h.trim();
-            if h.is_empty() { None } else { Some(h.to_string()) }
+            if h.is_empty() {
+                None
+            } else {
+                Some(h.to_string())
+            }
         })
         .collect()
 }
