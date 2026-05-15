@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 use crate::db::{self, MessageRow, Via};
 use crate::http::NotifyPayload;
+use crate::metrics::{
+    LivenessLabels, MessageLabels, Metrics, SendFailureLabels, SessionEventLabels, normalise_kind,
+};
 
 /// Protocol guidance delivered to every MCP client at `initialize`.
 /// Kept here (not inlined) because it is the primary mechanism by which
@@ -101,16 +104,23 @@ pub struct SalonState {
     /// named in the sender's environment — useful when the sender runs under
     /// a censored / observed LLM.
     pub aliases: HashMap<String, String>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl SalonState {
-    pub fn new(port: u16, db: SqlitePool, aliases: HashMap<String, String>) -> Self {
+    pub fn new(
+        port: u16,
+        db: SqlitePool,
+        aliases: HashMap<String, String>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             port,
             message_count: AtomicU64::new(0),
             sessions: Mutex::new(Vec::new()),
             db,
             aliases,
+            metrics,
         }
     }
 }
@@ -220,7 +230,12 @@ impl SalonHandler {
             sender_addr: None,
             sender_session_id: self.self_session_id.lock().await.clone(),
         };
+        let started = Instant::now();
         deliver_notification(&self.state, &payload, ctx).await;
+        self.state
+            .metrics
+            .send_message_duration
+            .observe(started.elapsed().as_secs_f64());
 
         Ok(match target_for_reply {
             Some(t) => format!("delivered to sessions labelled '{t}'"),
@@ -276,12 +291,30 @@ impl ServerHandler for SalonHandler {
             peer: ctx.peer,
             label: label.clone(),
         });
+        let active = sessions.len();
         log!(
             "agent-salon: session initialized (label={}, {} active, evicted {})",
             label.as_deref().unwrap_or("<unlabeled>"),
-            sessions.len(),
+            active,
             evicted,
         );
+
+        let metrics = &self.state.metrics;
+        metrics
+            .session_events
+            .get_or_create(&SessionEventLabels {
+                event: "connected".to_string(),
+            })
+            .inc();
+        if evicted > 0 {
+            metrics
+                .session_events
+                .get_or_create(&SessionEventLabels {
+                    event: "evicted".to_string(),
+                })
+                .inc_by(evicted as u64);
+        }
+        metrics.active_sessions.set(active as i64);
     }
 }
 
@@ -350,6 +383,8 @@ pub async fn deliver_notification(
         map
     };
 
+    let kind_label = normalise_kind(meta.get("kind").and_then(|v| v.as_str()));
+
     let params = serde_json::json!({
         "content": payload.content,
         "meta": meta,
@@ -376,6 +411,11 @@ pub async fn deliver_notification(
             .unwrap_or_else(|| t.to_string())
     });
 
+    let metrics = &state.metrics;
+    let target_label_for_metrics = resolved_target
+        .clone()
+        .unwrap_or_else(|| "<broadcast>".to_string());
+
     let mut sessions = state.sessions.lock().await;
     let mut alive = Vec::with_capacity(sessions.len());
     for session in sessions.drain(..) {
@@ -393,21 +433,69 @@ pub async fn deliver_notification(
             .unwrap_or_else(|| "<unlabeled>".into());
         if !probe_alive(&session.peer).await {
             log!("agent-salon: skipping delivery (ping failed), keeping session: {label_for_log}");
+            metrics
+                .liveness
+                .get_or_create(&LivenessLabels {
+                    target: label_for_log.clone(),
+                    result: "timeout".to_string(),
+                })
+                .inc();
+            metrics
+                .send_failures
+                .get_or_create(&SendFailureLabels {
+                    reason: "liveness_timeout".to_string(),
+                })
+                .inc();
             delivery_errors.push(label_for_log);
             alive.push(session);
             continue;
         }
+        metrics
+            .liveness
+            .get_or_create(&LivenessLabels {
+                target: label_for_log.clone(),
+                result: "ok".to_string(),
+            })
+            .inc();
         match session.peer.send_notification(notification.clone()).await {
             Ok(()) => {
+                metrics
+                    .messages
+                    .get_or_create(&MessageLabels {
+                        source: payload.source.clone().unwrap_or_default(),
+                        target: target_label_for_metrics.clone(),
+                        kind: kind_label.clone(),
+                    })
+                    .inc();
                 delivered_to.push(label_for_log);
                 alive.push(session);
             }
             Err(e) => {
                 log!("agent-salon: dropping session (send failed): {e}");
+                metrics
+                    .send_failures
+                    .get_or_create(&SendFailureLabels {
+                        reason: "delivery_error".to_string(),
+                    })
+                    .inc();
                 delivery_errors.push(label_for_log);
             }
         }
     }
+
+    // A targeted send that found no matching live session is a target_unknown
+    // failure. Broadcasts don't count — landing in nobody's mailbox is allowed
+    // (there might just be nobody listening).
+    if resolved_target.is_some() && delivered_to.is_empty() && delivery_errors.is_empty() {
+        metrics
+            .send_failures
+            .get_or_create(&SendFailureLabels {
+                reason: "target_unknown".to_string(),
+            })
+            .inc();
+    }
+
+    metrics.active_sessions.set(alive.len() as i64);
     *sessions = alive;
     drop(sessions);
 
@@ -424,7 +512,12 @@ pub async fn deliver_notification(
         sender_addr: ctx.sender_addr,
         sender_session_id: ctx.sender_session_id,
     };
-    if let Err(e) = db::insert_message(&state.db, &row).await {
-        log!("agent-salon: failed to persist message {}: {e}", row.id);
+    match db::insert_message(&state.db, &row).await {
+        Ok(()) => {
+            metrics.messages_stored.inc();
+        }
+        Err(e) => {
+            log!("agent-salon: failed to persist message {}: {e}", row.id);
+        }
     }
 }

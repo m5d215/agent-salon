@@ -4,12 +4,14 @@ mod admin;
 mod db;
 mod http;
 mod mcp;
+mod metrics;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use mcp::{SalonHandler, SalonState};
+use metrics::{BuildInfoLabels, Metrics};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -46,7 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actual_addr = listener.local_addr()?;
     let actual_port = actual_addr.port();
 
-    let state = Arc::new(SalonState::new(actual_port, pool, aliases));
+    let metrics = Arc::new(Metrics::new());
+    metrics
+        .build_info
+        .get_or_create(&BuildInfoLabels {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+        .set(1);
+
+    let state = Arc::new(SalonState::new(actual_port, pool, aliases, metrics));
 
     // MCP service: stateful streamable HTTP, fresh handler per session.
     let mut mcp_config = StreamableHttpServerConfig::default();
@@ -71,6 +81,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log!("  notify: POST http://{actual_addr}/notify");
     log!("  mcp:         http://{actual_addr}/mcp");
     log!("  admin UI:    http://{actual_addr}/admin");
+    log!("  metrics:     http://{actual_addr}/metrics");
+
+    // Periodically refresh db_size_bytes. SQLite's file grows on insert and
+    // shrinks on VACUUM; this poller keeps the gauge in step without slowing
+    // the hot path. 30s matches the default scrape interval expected from
+    // Alloy / Prometheus; jitter is unnecessary at this cadence.
+    {
+        let state = state.clone();
+        let db_path = db_path.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                if let Ok(meta) = tokio::fs::metadata(&db_path).await {
+                    state.metrics.db_size_bytes.set(meta.len() as i64);
+                }
+            }
+        });
+    }
 
     axum::serve(
         listener,
