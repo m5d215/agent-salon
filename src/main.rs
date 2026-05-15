@@ -1,3 +1,5 @@
+#[macro_use]
+mod log;
 mod admin;
 mod db;
 mod http;
@@ -30,14 +32,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     let pool = db::open(&db_path).await?;
-    eprintln!("agent-salon: db at {db_path}");
+    log!("agent-salon: db at {db_path}");
     if !aliases.is_empty() {
         // Count only — do not log the alias → real mapping, to avoid leaving
         // the real labels in plain-text logs that may be shipped elsewhere.
-        eprintln!("agent-salon: {} target alias(es) loaded", aliases.len());
+        log!("agent-salon: {} target alias(es) loaded", aliases.len());
     }
     if !allowed_hosts.is_empty() {
-        eprintln!("agent-salon: allowed hosts: {}", allowed_hosts.join(", "));
+        log!("agent-salon: allowed hosts: {}", allowed_hosts.join(", "));
     }
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
@@ -65,10 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .nest_service("/mcp", mcp_service);
 
-    eprintln!("agent-salon listening on http://{actual_addr}");
-    eprintln!("  notify: POST http://{actual_addr}/notify");
-    eprintln!("  mcp:         http://{actual_addr}/mcp");
-    eprintln!("  admin UI:    http://{actual_addr}/admin");
+    log!("agent-salon listening on http://{actual_addr}");
+    log!("  notify: POST http://{actual_addr}/notify");
+    log!("  mcp:         http://{actual_addr}/mcp");
+    log!("  admin UI:    http://{actual_addr}/admin");
 
     axum::serve(
         listener,
@@ -98,11 +100,11 @@ fn load_config_file() -> HashMap<String, String> {
     match std::fs::read_to_string(&path) {
         Ok(s) => {
             let map = parse_config(&s);
-            eprintln!("agent-salon: loaded {} setting(s) from {path}", map.len());
+            log!("agent-salon: loaded {} setting(s) from {path}", map.len());
             map
         }
         Err(e) => {
-            eprintln!("agent-salon: skipping config {path}: {e}");
+            log!("agent-salon: skipping config {path}: {e}");
             HashMap::new()
         }
     }
