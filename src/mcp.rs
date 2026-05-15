@@ -276,7 +276,7 @@ impl ServerHandler for SalonHandler {
             peer: ctx.peer,
             label: label.clone(),
         });
-        eprintln!(
+        log!(
             "agent-salon: session initialized (label={}, {} active, evicted {})",
             label.as_deref().unwrap_or("<unlabeled>"),
             sessions.len(),
@@ -392,9 +392,7 @@ pub async fn deliver_notification(
             .clone()
             .unwrap_or_else(|| "<unlabeled>".into());
         if !probe_alive(&session.peer).await {
-            eprintln!(
-                "agent-salon: skipping delivery (ping failed), keeping session: {label_for_log}"
-            );
+            log!("agent-salon: skipping delivery (ping failed), keeping session: {label_for_log}");
             delivery_errors.push(label_for_log);
             alive.push(session);
             continue;
@@ -405,7 +403,7 @@ pub async fn deliver_notification(
                 alive.push(session);
             }
             Err(e) => {
-                eprintln!("agent-salon: dropping session (send failed): {e}");
+                log!("agent-salon: dropping session (send failed): {e}");
                 delivery_errors.push(label_for_log);
             }
         }
@@ -427,6 +425,6 @@ pub async fn deliver_notification(
         sender_session_id: ctx.sender_session_id,
     };
     if let Err(e) = db::insert_message(&state.db, &row).await {
-        eprintln!("agent-salon: failed to persist message {}: {e}", row.id);
+        log!("agent-salon: failed to persist message {}: {e}", row.id);
     }
 }
