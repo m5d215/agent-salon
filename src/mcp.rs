@@ -298,14 +298,19 @@ fn extract_label(query: &str) -> Option<String> {
 /// silently swallows send errors when the client's GET /mcp stream has died
 /// (the message goes into the resume cache instead), so `send_notification`
 /// alone cannot tell us that a delivery failed. A request, on the other hand,
-/// expects a response — if no response comes back within this window, the
-/// peer is treated as dead and pruned from the session list.
-const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// expects a response — if no response comes back within this window, *this*
+/// delivery is skipped, but the session is kept registered: a Claude Code
+/// client that is mid-turn or backlogged can legitimately fail to turn a
+/// server-initiated `ping` around quickly, and a single missed probe must not
+/// evict an otherwise-live session. 15s trades broadcast latency (the probe
+/// loop is sequential, so each unresponsive session adds up to this much) for
+/// a far lower false-positive rate than the original 3s.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Probe a peer with a `ping` request to confirm its SSE channel is live.
 /// Returns `true` only when the peer responds within `LIVENESS_PROBE_TIMEOUT`.
-/// Both transport errors and timeouts collapse to `false`; the caller treats
-/// either as a dead session.
+/// Both transport errors and timeouts collapse to `false`; on `false` the
+/// caller skips this delivery for the session but leaves it registered.
 async fn probe_alive(peer: &Peer<RoleServer>) -> bool {
     let req = ServerRequest::PingRequest(PingRequest::default());
     matches!(
@@ -320,10 +325,12 @@ async fn probe_alive(peer: &Peer<RoleServer>) -> bool {
 ///   the notification.
 /// - If `payload.target` is None, every connected session receives it
 ///   (broadcast).
-/// - Each candidate session is probed with a `ping` request first; sessions
-///   whose probe fails (timeout or transport error) are pruned and recorded
-///   under `delivery_errors` in the persisted row, alongside sessions whose
-///   subsequent `send_notification` itself fails.
+/// - Each candidate session is probed with a `ping` request first; a session
+///   whose probe fails (timeout or transport error) is skipped for this
+///   message and recorded under `delivery_errors`, but it stays registered —
+///   a transient busy client must not be evicted on one missed probe. Only a
+///   session whose `send_notification` itself errors is pruned from the
+///   session list.
 pub async fn deliver_notification(
     state: &SalonState,
     payload: &NotifyPayload,
@@ -385,8 +392,11 @@ pub async fn deliver_notification(
             .clone()
             .unwrap_or_else(|| "<unlabeled>".into());
         if !probe_alive(&session.peer).await {
-            eprintln!("agent-salon: dropping session (ping failed): {label_for_log}");
+            eprintln!(
+                "agent-salon: skipping delivery (ping failed), keeping session: {label_for_log}"
+            );
             delivery_errors.push(label_for_log);
+            alive.push(session);
             continue;
         }
         match session.peer.send_notification(notification.clone()).await {
