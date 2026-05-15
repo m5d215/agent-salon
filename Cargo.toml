@@ -1,6 +1,6 @@
 [package]
 name = "agent-salon"
-version = "0.4.7"
+version = "0.4.9"
 edition = "2024"
 description = "A gathering place for Claude Code sessions — targeted channel-notification messaging between agents, plus an HTTP webhook inbox."
 license = "MIT"
@@ -19,3 +19,6 @@ serde_json = "1.0.149"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "macros"] }
 tokio = { version = "1.52.1", features = ["full"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

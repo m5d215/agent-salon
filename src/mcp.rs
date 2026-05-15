@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::db::{self, MessageRow, Via};
 use crate::http::NotifyPayload;
+use crate::jsonl::JsonlLogger;
 use crate::metrics::{
     LivenessLabels, MessageLabels, Metrics, SendFailureLabels, SessionEventLabels, normalise_kind,
 };
@@ -105,6 +106,7 @@ pub struct SalonState {
     /// a censored / observed LLM.
     pub aliases: HashMap<String, String>,
     pub metrics: Arc<Metrics>,
+    pub jsonl: Arc<JsonlLogger>,
 }
 
 impl SalonState {
@@ -113,6 +115,7 @@ impl SalonState {
         db: SqlitePool,
         aliases: HashMap<String, String>,
         metrics: Arc<Metrics>,
+        jsonl: Arc<JsonlLogger>,
     ) -> Self {
         Self {
             port,
@@ -121,6 +124,7 @@ impl SalonState {
             db,
             aliases,
             metrics,
+            jsonl,
         }
     }
 }
@@ -315,6 +319,25 @@ impl ServerHandler for SalonHandler {
                 .inc_by(evicted as u64);
         }
         metrics.active_sessions.set(active as i64);
+
+        self.state.jsonl.event(
+            "session_connected",
+            serde_json::json!({
+                "label": label,
+                "active": active,
+                "evicted": evicted,
+                "session_id": session_id,
+            }),
+        );
+        if evicted > 0 {
+            self.state.jsonl.event(
+                "session_evicted",
+                serde_json::json!({
+                    "label": label,
+                    "count": evicted,
+                }),
+            );
+        }
     }
 }
 
@@ -446,6 +469,14 @@ pub async fn deliver_notification(
                     reason: "liveness_timeout".to_string(),
                 })
                 .inc();
+            state.jsonl.event(
+                "delivery_skipped",
+                serde_json::json!({
+                    "target": label_for_log,
+                    "reason": "liveness_timeout",
+                    "message_id": id.to_string(),
+                }),
+            );
             delivery_errors.push(label_for_log);
             alive.push(session);
             continue;
@@ -478,6 +509,14 @@ pub async fn deliver_notification(
                         reason: "delivery_error".to_string(),
                     })
                     .inc();
+                state.jsonl.event(
+                    "send_failed",
+                    serde_json::json!({
+                        "target": label_for_log,
+                        "error": e.to_string(),
+                        "message_id": id.to_string(),
+                    }),
+                );
                 delivery_errors.push(label_for_log);
             }
         }
@@ -520,4 +559,10 @@ pub async fn deliver_notification(
             log!("agent-salon: failed to persist message {}: {e}", row.id);
         }
     }
+
+    // Emit the message body to the JSONL log regardless of DB outcome — the
+    // shipping path is independent of persistence, and the log line is the
+    // most useful record either way (DB failures are rare but rare enough to
+    // matter).
+    state.jsonl.message(&row);
 }

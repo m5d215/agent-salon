@@ -3,6 +3,7 @@ mod log;
 mod admin;
 mod db;
 mod http;
+mod jsonl;
 mod mcp;
 mod metrics;
 
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use jsonl::JsonlLogger;
 use mcp::{SalonHandler, SalonState};
 use metrics::{BuildInfoLabels, Metrics};
 use rmcp::transport::streamable_http_server::{
@@ -56,7 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .set(1);
 
-    let state = Arc::new(SalonState::new(actual_port, pool, aliases, metrics));
+    let jsonl = Arc::new(JsonlLogger::from_env());
+
+    let state = Arc::new(SalonState::new(actual_port, pool, aliases, metrics, jsonl));
 
     // MCP service: stateful streamable HTTP, fresh handler per session.
     let mut mcp_config = StreamableHttpServerConfig::default();
