@@ -88,7 +88,13 @@ can target.
 "#;
 
 /// A connected MCP session and its user-supplied label (from `?label=` query).
+/// `id` is a salon-local identity used for eviction bookkeeping in
+/// `deliver_notification`: when a send fails on a specific peer, we need to
+/// remove _that exact_ session from the registered list even though
+/// `Peer<RoleServer>` itself exposes no identity (its internal channel is
+/// private), so we tag every session at registration time.
 pub struct Session {
+    pub id: Uuid,
     pub peer: Peer<RoleServer>,
     pub label: Option<String>,
 }
@@ -292,6 +298,7 @@ impl ServerHandler for SalonHandler {
             0
         };
         sessions.push(Session {
+            id: Uuid::now_v7(),
             peer: ctx.peer,
             label: label.clone(),
         });
@@ -349,25 +356,34 @@ fn extract_label(query: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-/// Maximum time to wait for a `ping` round-trip when probing whether a
-/// session's SSE channel is actually alive. rmcp's streamable-HTTP transport
-/// silently swallows send errors when the client's GET /mcp stream has died
-/// (the message goes into the resume cache instead), so `send_notification`
-/// alone cannot tell us that a delivery failed. A request, on the other hand,
-/// expects a response — if no response comes back within this window, *this*
-/// delivery is skipped, but the session is kept registered: a Claude Code
-/// client that is mid-turn or backlogged can legitimately fail to turn a
-/// server-initiated `ping` around quickly, and a single missed probe must not
-/// evict an otherwise-live session. 15s trades broadcast latency (the probe
-/// loop is sequential, so each unresponsive session adds up to this much) for
-/// a far lower false-positive rate than the original 3s.
-const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-attempt timeout for the `ping` round-trip when probing whether a
+/// session's SSE channel is alive. rmcp's streamable-HTTP transport silently
+/// swallows send errors when the client's GET /mcp stream has died (the
+/// message goes into the resume cache instead), so `send_notification` alone
+/// cannot tell us that a delivery failed. A `ping` request expects a response,
+/// so its outcome is observable.
+///
+/// 5s is short enough to retry within the budget below but generous enough
+/// for an idle Claude Code session on a Tailnet hop. A truly busy client
+/// (mid-turn) gets multiple chances via the retry loop.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Probe a peer with a `ping` request to confirm its SSE channel is live.
-/// Returns `true` only when the peer responds within `LIVENESS_PROBE_TIMEOUT`.
-/// Both transport errors and timeouts collapse to `false`; on `false` the
-/// caller skips this delivery for the session but leaves it registered.
-async fn probe_alive(peer: &Peer<RoleServer>) -> bool {
+/// Maximum number of probe attempts for a targeted send before giving up and
+/// recording `liveness_timeout`. Three attempts at 5s each plus inter-attempt
+/// backoff keeps total wall-clock around the previous 15s single-shot budget
+/// while letting transient transport failures (Claude Code's hard-coded 306s
+/// MCP reconnect, brief Wi-Fi blips) heal mid-probe. ADR 0004 §3.
+const LIVENESS_PROBE_MAX_ATTEMPTS: u32 = 3;
+
+/// Delay between probe attempts. Gives the receiver's MCP transport room to
+/// finish reconnecting (Claude Code's exponential backoff is 1/2/4/8/16s, so
+/// even one short pause often lets the new session register) before we
+/// re-resolve the label and try again.
+const LIVENESS_PROBE_RETRY_BACKOFF: Duration = Duration::from_millis(750);
+
+/// Probe a peer once with a `ping` request, bounded by `LIVENESS_PROBE_TIMEOUT`.
+/// Both transport errors and timeouts collapse to `false`.
+async fn probe_alive_once(peer: &Peer<RoleServer>) -> bool {
     let req = ServerRequest::PingRequest(PingRequest::default());
     matches!(
         tokio::time::timeout(LIVENESS_PROBE_TIMEOUT, peer.send_request(req)).await,
@@ -375,18 +391,74 @@ async fn probe_alive(peer: &Peer<RoleServer>) -> bool {
     )
 }
 
+/// Probe a target-label peer with bounded retry. Between attempts, the
+/// salon's session list is re-resolved so a session that was evicted and
+/// replaced (Claude Code's 306s reconnect cycle is the common cause) lets the
+/// next attempt land on the fresh peer rather than the one whose transport
+/// just died. Returns the peer that ultimately responded along with the
+/// 1-based attempt count, or `None` if every attempt failed.
+async fn probe_alive_with_retry(
+    state: &SalonState,
+    target_label: &str,
+    initial: Peer<RoleServer>,
+) -> ProbeOutcome {
+    let mut current = initial;
+    for attempt in 1..=LIVENESS_PROBE_MAX_ATTEMPTS {
+        if probe_alive_once(&current).await {
+            return ProbeOutcome::Alive {
+                peer: current,
+                attempts: attempt,
+            };
+        }
+        if attempt >= LIVENESS_PROBE_MAX_ATTEMPTS {
+            return ProbeOutcome::Dead { attempts: attempt };
+        }
+        tokio::time::sleep(LIVENESS_PROBE_RETRY_BACKOFF).await;
+        let sessions = state.sessions.lock().await;
+        match sessions
+            .iter()
+            .find(|s| s.label.as_deref() == Some(target_label))
+        {
+            Some(s) => current = s.peer.clone(),
+            None => {
+                return ProbeOutcome::Dead { attempts: attempt };
+            }
+        }
+    }
+    ProbeOutcome::Dead {
+        attempts: LIVENESS_PROBE_MAX_ATTEMPTS,
+    }
+}
+
+enum ProbeOutcome {
+    Alive {
+        peer: Peer<RoleServer>,
+        attempts: u32,
+    },
+    Dead {
+        attempts: u32,
+    },
+}
+
 /// Deliver a notification to matching sessions and persist it to the DB.
 ///
 /// - If `payload.target` is set, only sessions whose label equals it receive
-///   the notification.
+///   the notification. The probe runs with bounded retry that re-resolves the
+///   target label between attempts (ADR 0004 §3) so a session evicted and
+///   replaced by Claude Code's 306s MCP reconnect can still be reached.
 /// - If `payload.target` is None, every connected session receives it
-///   (broadcast).
-/// - Each candidate session is probed with a `ping` request first; a session
-///   whose probe fails (timeout or transport error) is skipped for this
-///   message and recorded under `delivery_errors`, but it stays registered —
-///   a transient busy client must not be evicted on one missed probe. Only a
-///   session whose `send_notification` itself errors is pruned from the
-///   session list.
+///   (broadcast). Each candidate is probed once; no retry, since there is no
+///   single target label to re-resolve against.
+/// - A session whose probe ultimately fails is skipped for this message and
+///   recorded under `delivery_errors`, but it stays registered — a transient
+///   busy client must not be evicted on one missed probe. Only a session
+///   whose `send_notification` itself errors is pruned from the session list.
+///
+/// Lock discipline: the `state.sessions` mutex is held only briefly, to
+/// snapshot the candidate peers at the start and to apply post-send eviction
+/// at the end. Probes and notification sends happen lock-free so new sessions
+/// can register mid-flight (this is exactly what enables retry to pick up the
+/// post-eviction replacement).
 pub async fn deliver_notification(
     state: &SalonState,
     payload: &NotifyPayload,
@@ -439,56 +511,83 @@ pub async fn deliver_notification(
         .clone()
         .unwrap_or_else(|| "<broadcast>".to_string());
 
-    let mut sessions = state.sessions.lock().await;
-    let mut alive = Vec::with_capacity(sessions.len());
-    for session in sessions.drain(..) {
-        let matches = match &resolved_target {
-            None => true,
-            Some(target) => session.label.as_deref() == Some(target.as_str()),
+    // Snapshot the candidates under a brief lock, then drop it so probes and
+    // sends below run lock-free. Each candidate carries the session's salon
+    // id so the post-send eviction pass can remove the exact session even if
+    // the same label has been replaced in the meantime.
+    let candidates: Vec<(Uuid, Peer<RoleServer>, String)> = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .iter()
+            .filter(|s| match &resolved_target {
+                None => true,
+                Some(target) => s.label.as_deref() == Some(target.as_str()),
+            })
+            .map(|s| {
+                let label = s.label.clone().unwrap_or_else(|| "<unlabeled>".into());
+                (s.id, s.peer.clone(), label)
+            })
+            .collect()
+    };
+
+    let mut to_evict: Vec<Uuid> = Vec::new();
+
+    for (session_id, peer, label_for_log) in candidates {
+        let outcome = match &resolved_target {
+            Some(target) => probe_alive_with_retry(state, target, peer).await,
+            None => {
+                if probe_alive_once(&peer).await {
+                    ProbeOutcome::Alive { peer, attempts: 1 }
+                } else {
+                    ProbeOutcome::Dead { attempts: 1 }
+                }
+            }
         };
-        if !matches {
-            alive.push(session);
-            continue;
-        }
-        let label_for_log = session
-            .label
-            .clone()
-            .unwrap_or_else(|| "<unlabeled>".into());
-        if !probe_alive(&session.peer).await {
-            log!("agent-salon: skipping delivery (ping failed), keeping session: {label_for_log}");
-            metrics
-                .liveness
-                .get_or_create(&LivenessLabels {
-                    target: label_for_log.clone(),
-                    result: "timeout".to_string(),
-                })
-                .inc();
-            metrics
-                .send_failures
-                .get_or_create(&SendFailureLabels {
-                    reason: "liveness_timeout".to_string(),
-                })
-                .inc();
-            state.jsonl.event(
-                "delivery_skipped",
-                serde_json::json!({
-                    "target": label_for_log,
-                    "reason": "liveness_timeout",
-                    "message_id": id.to_string(),
-                }),
-            );
-            delivery_errors.push(label_for_log);
-            alive.push(session);
-            continue;
-        }
+
+        let (alive_peer, attempts) = match outcome {
+            ProbeOutcome::Alive { peer, attempts } => (peer, attempts),
+            ProbeOutcome::Dead { attempts } => {
+                log!(
+                    "agent-salon: skipping delivery (ping failed after {attempts} attempt(s)), \
+                     keeping session: {label_for_log}"
+                );
+                metrics
+                    .liveness
+                    .get_or_create(&LivenessLabels {
+                        target: label_for_log.clone(),
+                        result: "timeout".to_string(),
+                        attempt: attempts.to_string(),
+                    })
+                    .inc();
+                metrics
+                    .send_failures
+                    .get_or_create(&SendFailureLabels {
+                        reason: "liveness_timeout".to_string(),
+                    })
+                    .inc();
+                state.jsonl.event(
+                    "delivery_skipped",
+                    serde_json::json!({
+                        "target": label_for_log,
+                        "reason": "liveness_timeout",
+                        "attempts": attempts,
+                        "message_id": id.to_string(),
+                    }),
+                );
+                delivery_errors.push(label_for_log);
+                continue;
+            }
+        };
+
         metrics
             .liveness
             .get_or_create(&LivenessLabels {
                 target: label_for_log.clone(),
                 result: "ok".to_string(),
+                attempt: attempts.to_string(),
             })
             .inc();
-        match session.peer.send_notification(notification.clone()).await {
+        match alive_peer.send_notification(notification.clone()).await {
             Ok(()) => {
                 metrics
                     .messages
@@ -499,7 +598,6 @@ pub async fn deliver_notification(
                     })
                     .inc();
                 delivered_to.push(label_for_log);
-                alive.push(session);
             }
             Err(e) => {
                 log!("agent-salon: dropping session (send failed): {e}");
@@ -518,6 +616,7 @@ pub async fn deliver_notification(
                     }),
                 );
                 delivery_errors.push(label_for_log);
+                to_evict.push(session_id);
             }
         }
     }
@@ -534,9 +633,18 @@ pub async fn deliver_notification(
             .inc();
     }
 
-    metrics.active_sessions.set(alive.len() as i64);
-    *sessions = alive;
-    drop(sessions);
+    // Apply post-send eviction: remove sessions whose `send_notification`
+    // returned Err. Match by salon-local session id so we don't accidentally
+    // remove a different same-label session that has registered in the
+    // meantime (e.g. mid-probe reconnect that the retry loop just picked up).
+    let active_after = {
+        let mut sessions = state.sessions.lock().await;
+        if !to_evict.is_empty() {
+            sessions.retain(|s| !to_evict.contains(&s.id));
+        }
+        sessions.len()
+    };
+    metrics.active_sessions.set(active_after as i64);
 
     let row = MessageRow {
         id,

@@ -28,6 +28,11 @@ pub struct LivenessLabels {
     pub target: String,
     /// `ok` | `timeout`
     pub result: String,
+    /// 1-based attempt number that produced `result`. For an `ok` outcome,
+    /// this is the attempt that succeeded; for a `timeout` outcome, the last
+    /// attempt that was made (i.e. how many tries were burned). Bounded by
+    /// `LIVENESS_PROBE_MAX_ATTEMPTS` so cardinality stays small.
+    pub attempt: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
