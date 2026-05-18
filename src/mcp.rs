@@ -411,18 +411,17 @@ async fn probe_alive_with_retry(
             };
         }
         if attempt >= LIVENESS_PROBE_MAX_ATTEMPTS {
-            return ProbeOutcome::Dead {
-                attempts: attempt,
-            };
+            return ProbeOutcome::Dead { attempts: attempt };
         }
         tokio::time::sleep(LIVENESS_PROBE_RETRY_BACKOFF).await;
         let sessions = state.sessions.lock().await;
-        match sessions.iter().find(|s| s.label.as_deref() == Some(target_label)) {
+        match sessions
+            .iter()
+            .find(|s| s.label.as_deref() == Some(target_label))
+        {
             Some(s) => current = s.peer.clone(),
             None => {
-                return ProbeOutcome::Dead {
-                    attempts: attempt,
-                };
+                return ProbeOutcome::Dead { attempts: attempt };
             }
         }
     }
