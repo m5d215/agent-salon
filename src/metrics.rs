@@ -48,6 +48,18 @@ pub struct SessionEventLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KeepaliveLabels {
+    pub label: String,
+    /// `ok` | `fail`
+    pub result: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KeepaliveEvictionLabels {
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct BuildInfoLabels {
     pub version: String,
 }
@@ -79,6 +91,8 @@ pub struct Metrics {
     pub send_message_duration: Histogram,
     pub active_sessions: Gauge,
     pub session_events: Family<SessionEventLabels, Counter>,
+    pub keepalive_pings: Family<KeepaliveLabels, Counter>,
+    pub keepalive_evictions: Family<KeepaliveEvictionLabels, Counter>,
     pub messages_stored: Counter,
     pub db_size_bytes: Gauge,
     pub build_info: Family<BuildInfoLabels, Gauge>,
@@ -130,6 +144,20 @@ impl Metrics {
             session_events.clone(),
         );
 
+        let keepalive_pings = Family::<KeepaliveLabels, Counter>::default();
+        registry.register(
+            "keepalive_pings",
+            "Per-session background keepalive ping outcomes, by label and result",
+            keepalive_pings.clone(),
+        );
+
+        let keepalive_evictions = Family::<KeepaliveEvictionLabels, Counter>::default();
+        registry.register(
+            "keepalive_evictions",
+            "Sessions self-evicted by the keepalive task after consecutive ping failures",
+            keepalive_evictions.clone(),
+        );
+
         let messages_stored = Counter::default();
         registry.register(
             "messages_stored",
@@ -159,6 +187,8 @@ impl Metrics {
             send_message_duration,
             active_sessions,
             session_events,
+            keepalive_pings,
+            keepalive_evictions,
             messages_stored,
             db_size_bytes,
             build_info,

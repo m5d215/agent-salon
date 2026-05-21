@@ -15,13 +15,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::{self, MessageRow, Via};
 use crate::http::NotifyPayload;
 use crate::jsonl::JsonlLogger;
 use crate::metrics::{
-    LivenessLabels, MessageLabels, Metrics, SendFailureLabels, SessionEventLabels, normalise_kind,
+    KeepaliveEvictionLabels, KeepaliveLabels, LivenessLabels, MessageLabels, Metrics,
+    SendFailureLabels, SessionEventLabels, normalise_kind,
 };
 
 /// Protocol guidance delivered to every MCP client at `initialize`.
@@ -93,10 +95,18 @@ can target.
 /// remove _that exact_ session from the registered list even though
 /// `Peer<RoleServer>` itself exposes no identity (its internal channel is
 /// private), so we tag every session at registration time.
+///
+/// `keepalive_cancel` stops the per-session background keepalive task (see
+/// `spawn_keepalive_task`). Every eviction path (same-label reconnect,
+/// `deliver_notification` send_failed evict, keepalive self-evict) MUST
+/// call `keepalive_cancel.cancel()` before dropping the `Session` so the
+/// task wakes up immediately and releases its `Peer` handle instead of
+/// burning a 240s tick waiting to notice.
 pub struct Session {
     pub id: Uuid,
     pub peer: Peer<RoleServer>,
     pub label: Option<String>,
+    pub keepalive_cancel: CancellationToken,
 }
 
 /// Shared state of the salon.
@@ -284,6 +294,10 @@ impl ServerHandler for SalonHandler {
         *self.self_label.lock().await = label.clone();
         *self.self_session_id.lock().await = session_id.clone();
 
+        let new_session_id = Uuid::now_v7();
+        let new_peer = ctx.peer.clone();
+        let keepalive_cancel = CancellationToken::new();
+
         let mut sessions = self.state.sessions.lock().await;
         // Treat label as identity: a new connection with the same label evicts
         // any prior session holding it. Reconnects (e.g. Claude Code's /clear)
@@ -292,15 +306,25 @@ impl ServerHandler for SalonHandler {
         // targeted, so duplicates do no harm.
         let evicted = if let Some(new_label) = label.as_deref() {
             let before = sessions.len();
-            sessions.retain(|s| s.label.as_deref() != Some(new_label));
+            sessions.retain(|s| {
+                if s.label.as_deref() == Some(new_label) {
+                    // Stop the old session's keepalive task now — otherwise it
+                    // sits on its peer until the next 240s tick.
+                    s.keepalive_cancel.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
             before - sessions.len()
         } else {
             0
         };
         sessions.push(Session {
-            id: Uuid::now_v7(),
+            id: new_session_id,
             peer: ctx.peer,
             label: label.clone(),
+            keepalive_cancel: keepalive_cancel.clone(),
         });
         let active = sessions.len();
         log!(
@@ -345,6 +369,15 @@ impl ServerHandler for SalonHandler {
                 }),
             );
         }
+        drop(sessions);
+
+        spawn_keepalive_task(
+            self.state.clone(),
+            new_session_id,
+            new_peer,
+            label,
+            keepalive_cancel,
+        );
     }
 }
 
@@ -367,6 +400,25 @@ fn extract_label(query: &str) -> Option<String> {
 /// for an idle Claude Code session on a Tailnet hop. A truly busy client
 /// (mid-turn) gets multiple chances via the retry loop.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Interval between background keepalive pings issued by the per-session task
+/// spawned in `on_initialized`. ADR 0005 §1.
+///
+/// rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 300s — if no `SessionEvent`
+/// hits the session worker for that long, it `fatal`-exits and tower auto-
+/// removes the session from `LocalSessionManager`. The next POST then returns
+/// 404 "Session not found" while the Claude Code client still thinks it is
+/// connected. Pinging at 240s gives a comfortable margin below 300s; one
+/// in-flight `peer.send_request` rides on `EstablishRequestWiseChannel` which
+/// feeds the worker's `event_rx` and so resets the keep_alive timer.
+const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(240);
+
+/// Number of consecutive keepalive ping failures that count as "this session
+/// is gone" and trigger self-eviction. 3 × `KEEPALIVE_PING_INTERVAL` ≈ 12 min
+/// of unresponsiveness — longer than Claude Code's 306s reconnect cycle plus
+/// transient Wi-Fi drops, but short enough that genuinely dead sessions do
+/// not linger forever. ADR 0005 §1.
+const KEEPALIVE_FAILURE_THRESHOLD: u32 = 3;
 
 /// Maximum number of probe attempts for a targeted send before giving up and
 /// recording `liveness_timeout`. Three attempts at 5s each plus inter-attempt
@@ -640,7 +692,14 @@ pub async fn deliver_notification(
     let active_after = {
         let mut sessions = state.sessions.lock().await;
         if !to_evict.is_empty() {
-            sessions.retain(|s| !to_evict.contains(&s.id));
+            sessions.retain(|s| {
+                if to_evict.contains(&s.id) {
+                    s.keepalive_cancel.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
         }
         sessions.len()
     };
@@ -673,4 +732,106 @@ pub async fn deliver_notification(
     // most useful record either way (DB failures are rare but rare enough to
     // matter).
     state.jsonl.message(&row);
+}
+
+/// Spawn a background task that keeps `session_id`'s rmcp session worker from
+/// hitting its 5-minute `keep_alive` timeout. Sleeps `KEEPALIVE_PING_INTERVAL`
+/// at a time, then issues one `probe_alive_once` ping; success feeds the
+/// session worker's `event_rx` (via `EstablishRequestWiseChannel`) and resets
+/// the timer. ADR 0005.
+///
+/// `KEEPALIVE_FAILURE_THRESHOLD` consecutive ping failures self-evict the
+/// session — the underlying transport is almost certainly gone. The
+/// `keepalive_cancel` token lets external eviction paths (same-label reconnect,
+/// `deliver_notification` send_failed evict) stop the task synchronously so it
+/// releases its `Peer` handle instead of riding out the current 240s sleep.
+///
+/// We deliberately do not emit a JSONL event per ping (240s × N sessions of
+/// log noise). Only the self-eviction path writes a `session_keepalive_evicted`
+/// event for audit.
+fn spawn_keepalive_task(
+    state: Arc<SalonState>,
+    session_id: Uuid,
+    peer: Peer<RoleServer>,
+    label: Option<String>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let label_for_metrics = label.clone().unwrap_or_else(|| "<unlabeled>".to_string());
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    return;
+                }
+                _ = tokio::time::sleep(KEEPALIVE_PING_INTERVAL) => {}
+            }
+            // Re-check the cancellation token after waking — the session may
+            // have been evicted while we slept, in which case skip the ping.
+            if cancel.is_cancelled() {
+                return;
+            }
+            let alive = probe_alive_once(&peer).await;
+            let result = if alive { "ok" } else { "fail" };
+            state
+                .metrics
+                .keepalive_pings
+                .get_or_create(&KeepaliveLabels {
+                    label: label_for_metrics.clone(),
+                    result: result.to_string(),
+                })
+                .inc();
+            if alive {
+                consecutive_failures = 0;
+                continue;
+            }
+            consecutive_failures += 1;
+            if consecutive_failures < KEEPALIVE_FAILURE_THRESHOLD {
+                continue;
+            }
+            // Self-evict. Match the existing eviction pattern: lock the
+            // session list, remove the entry with our salon-local id, drop
+            // the lock, then emit metrics / jsonl outside the lock.
+            let active_after = {
+                let mut sessions = state.sessions.lock().await;
+                let before = sessions.len();
+                sessions.retain(|s| s.id != session_id);
+                let removed = before - sessions.len();
+                if removed == 0 {
+                    // Someone else already removed us (e.g. label-collision
+                    // reconnect). Nothing more to do.
+                    return;
+                }
+                sessions.len()
+            };
+            log!(
+                "agent-salon: keepalive evicting session (label={label_for_metrics}, \
+                 {consecutive_failures} consecutive ping failures)"
+            );
+            state.metrics.active_sessions.set(active_after as i64);
+            state
+                .metrics
+                .session_events
+                .get_or_create(&SessionEventLabels {
+                    event: "evicted".to_string(),
+                })
+                .inc();
+            state
+                .metrics
+                .keepalive_evictions
+                .get_or_create(&KeepaliveEvictionLabels {
+                    label: label_for_metrics.clone(),
+                })
+                .inc();
+            state.jsonl.event(
+                "session_keepalive_evicted",
+                serde_json::json!({
+                    "label": label,
+                    "session_id": session_id.to_string(),
+                    "consecutive_failures": consecutive_failures,
+                }),
+            );
+            return;
+        }
+    });
 }
