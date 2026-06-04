@@ -190,7 +190,9 @@ pub async fn list_messages(
          sender_addr, sender_session_id FROM messages {where_clause} \
          ORDER BY ts DESC LIMIT ? OFFSET ?"
     );
-    let mut q = sqlx::query(&sql);
+    // Audited: `where_clause` is assembled only from static fragments; every user
+    // value is passed via a `?` placeholder and bound below.
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }
@@ -202,7 +204,9 @@ pub async fn list_messages(
 pub async fn count_messages(pool: &SqlitePool, f: &ListFilters) -> Result<i64, sqlx::Error> {
     let (where_clause, binds) = build_where(f);
     let sql = format!("SELECT COUNT(*) as c FROM messages {where_clause}");
-    let mut q = sqlx::query(&sql);
+    // Audited: `where_clause` is assembled only from static fragments; every user
+    // value is passed via a `?` placeholder and bound below.
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }
@@ -231,7 +235,11 @@ pub async fn distinct_labels(
     let sql = format!(
         "SELECT DISTINCT {column} FROM messages WHERE {column} IS NOT NULL ORDER BY {column}"
     );
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
+    // Audited: `column` is a `&'static str` asserted above to be "source" or "target",
+    // so the interpolation cannot carry user input.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await?;
     Ok(rows.iter().map(|r| r.get::<String, _>(column)).collect())
 }
 
